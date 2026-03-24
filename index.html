@@ -3,19 +3,18 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>ClinicFlow | Secure Portal</title>
+  <title>ClinicFlow | Professional Portal</title>
   <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
   <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
   <script src="https://cdn.tailwindcss.com"></script>
   <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.js"></script>
   <style>
-    body { background-color: #f8fafc; color: #1e293b; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+    body { background-color: #f8fafc; color: #1e293b; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
     .animate-in { animation: fadeIn 0.4s ease-out; }
     @keyframes fadeIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
     .custom-scrollbar::-webkit-scrollbar { width: 6px; }
     .custom-scrollbar::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 10px; }
-    @media print { .no-print { display: none !important; } }
   </style>
 </head>
 <body>
@@ -30,14 +29,12 @@
     };
 
     // --- CONFIGURATION ---
-    const apiKey = ""; // Canvas environment provides this at runtime
-    // REPLACE THIS WITH YOUR ACTUAL GOOGLE APPS SCRIPT WEB APP URL:
+    const apiKey = "AIzaSyCW-UgXFZpbdqp1Cu-k691q7h_nvZu7ovY"; 
     const SCRIPT_URL = "https://script.google.com/macros/s/AKfycbzuebIKaOUaautJwjjofHMQmuLiJRUy3CP4yRXL42pf7d2spujhvBhu16NnZZA2pJkNdw/exec"; 
 
     function App() {
       const [isAuthenticated, setIsAuthenticated] = useState(false);
       const [passcode, setPasscode] = useState("");
-      
       const [view, setView] = useState('list');
       const [patients, setPatients] = useState([]);
       const [selectedPatient, setSelectedPatient] = useState(null);
@@ -45,39 +42,31 @@
       const [isLoading, setIsLoading] = useState(false);
       const [statusMsg, setStatusMsg] = useState(null);
 
-      // Feature States
+      // Session States
       const [isRecording, setIsRecording] = useState(false);
-      const [recordTime, setRecordTime] = useState(0);
+      const [audioUrl, setAudioUrl] = useState(null); // NEW: Visual playback
       const [audioBase64, setAudioBase64] = useState(null);
-      const [hepPhotos, setHepPhotos] = useState([]);
-      const [showCamera, setShowCamera] = useState(false);
+      const [audioMime, setAudioMime] = useState("audio/webm");
       const [currentSoap, setCurrentSoap] = useState("");
-      const [generatedHEP, setGeneratedHEP] = useState(null);
-      const [superbillData, setSuperbillData] = useState(null);
 
       const mediaRecorderRef = useRef(null);
       const audioChunksRef = useRef([]);
-      const videoRef = useRef(null);
-      const timerRef = useRef(null);
+
+      const showToast = (msg) => {
+        setStatusMsg(msg);
+        setTimeout(() => setStatusMsg(null), 6000);
+      };
 
       const callApi = async (action, data = {}) => {
         try {
-          const res = await fetch(SCRIPT_URL, {
+          const response = await fetch(SCRIPT_URL, {
             method: 'POST',
-            redirect: 'follow', // Required for Google Apps Script redirects
-            headers: {
-              "Content-Type": "text/plain;charset=utf-8", // Prevents CORS preflight issues
-            },
             body: JSON.stringify({ action, data, passcode })
           });
-          const json = await res.json();
-          if (json.status === 'error' && json.message === 'Unauthorized') {
-             setIsAuthenticated(false);
-             throw new Error("Invalid Passcode");
-          }
+          const json = await response.json();
           return json;
         } catch (e) {
-          alert(e.message);
+          alert("Database Error: Check your SCRIPT_URL");
           return { status: 'error' };
         }
       };
@@ -92,181 +81,126 @@
         setIsLoading(false);
       };
 
-      const toggleRecording = async () => {
-        if (!isRecording) {
-          try {
-            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-            mediaRecorderRef.current = new MediaRecorder(stream);
-            audioChunksRef.current = [];
-            mediaRecorderRef.current.ondataavailable = (e) => audioChunksRef.current.push(e.data);
-            mediaRecorderRef.current.onstop = () => {
-              const blob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
-              const r = new FileReader();
-              r.readAsDataURL(blob);
-              r.onloadend = () => setAudioBase64(r.result.split(',')[1]);
-              stream.getTracks().forEach(t => t.stop());
-            };
-            mediaRecorderRef.current.start();
-            setIsRecording(true);
-            timerRef.current = setInterval(() => setRecordTime(p => p + 1), 1000);
-          } catch (e) { alert("Mic Permission Required."); }
-        } else {
-          mediaRecorderRef.current.stop();
-          setIsRecording(false);
-          clearInterval(timerRef.current);
-          setRecordTime(0);
-        }
-      };
-
-      const takeSnapshot = async () => {
-        if (!showCamera) {
-          try {
-            const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
-            videoRef.current.srcObject = stream;
-            setShowCamera(true);
-          } catch (e) {
-            alert("Camera permission required.");
-          }
-        } else {
-          const c = document.createElement('canvas');
-          c.width = videoRef.current.videoWidth; 
-          c.height = videoRef.current.videoHeight;
-          c.getContext('2d').drawImage(videoRef.current, 0, 0);
-          setHepPhotos(p => [...p, c.toDataURL('image/png')]);
-        }
-      };
-
-      const generateSOAP = async () => {
+      const openPatient = async (p) => {
         setIsLoading(true);
-        const parts = [{ text: "Write professional PT SOAP note from audio. Start with S:" }];
-        if (audioBase64) parts.push({ inlineData: { mimeType: "audio/webm", data: audioBase64 } });
-        try {
-          const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`, {
-            method: 'POST', 
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ contents: [{ parts }] })
-          });
-          const json = await res.json();
-          if (json.candidates && json.candidates.length > 0) {
-            setCurrentSoap(json.candidates[0].content.parts[0].text);
-          } else {
-            alert("Error generating SOAP note.");
-          }
-        } catch (error) {
-          alert("Failed to connect to AI service.");
+        setSelectedPatient(p);
+        const res = await callApi('getPatientHistory', { patientName: p.name });
+        if (res.status === 'success') {
+          setHistory(res.data);
+          setView('detail');
         }
         setIsLoading(false);
       };
 
+      const toggleRecording = async () => {
+        if (!isRecording) {
+          try {
+            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            const mimeType = MediaRecorder.isTypeSupported('audio/webm') ? 'audio/webm' : 'audio/mp4';
+            setAudioMime(mimeType);
+
+            mediaRecorderRef.current = new MediaRecorder(stream, { mimeType });
+            audioChunksRef.current = [];
+            
+            mediaRecorderRef.current.ondataavailable = (e) => audioChunksRef.current.push(e.data);
+            
+            mediaRecorderRef.current.onstop = () => {
+              const blob = new Blob(audioChunksRef.current, { type: mimeType });
+              const url = URL.createObjectURL(blob);
+              setAudioUrl(url); // Sets visual player
+
+              const reader = new FileReader();
+              reader.readAsDataURL(blob);
+              reader.onloadend = () => {
+                setAudioBase64(reader.result.split(',')[1]);
+                showToast("Recording saved to memory. Ready for AI.");
+              };
+              stream.getTracks().forEach(t => t.stop());
+            };
+
+            mediaRecorderRef.current.start();
+            setIsRecording(true);
+          } catch (e) { alert("Mic Error: " + e.message); }
+        } else {
+          mediaRecorderRef.current.stop();
+          setIsRecording(false);
+        }
+      };
+
+      const callGemini = async (prompt) => {
+        const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`;
+        const payload = {
+          contents: [{ parts: [{ text: prompt }, { inlineData: { mimeType: audioMime, data: audioBase64 } }] }]
+        };
+        const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+        const json = await res.json();
+        if (!res.ok) throw new Error(json.error?.message || "AI Error");
+        return json.candidates[0].content.parts[0].text;
+      };
+
+      const generateSOAP = async () => {
+        if (!audioBase64) return showToast("No recording found.");
+        setIsLoading(true);
+        try {
+          const text = await callGemini("Write a professional PT/MLD SOAP note from this audio.");
+          setCurrentSoap(text);
+          showToast("SOAP Note Generated.");
+        } catch (e) { showToast(`AI Error: ${e.message}`); }
+        setIsLoading(false);
+      };
+
       if (!isAuthenticated) return (
-        <div className="h-screen flex items-center justify-center bg-slate-900 p-6">
-          <div className="bg-white p-10 rounded-[3rem] shadow-2xl w-full max-w-sm animate-in">
-            <h1 className="text-2xl font-black mb-2 tracking-tighter">ClinicFlow <span className="text-blue-600">Pro</span></h1>
-            <p className="text-slate-400 text-xs font-bold uppercase mb-8">Secure Clinician Access</p>
-            <input 
-              type="password" 
-              placeholder="Clinic Passcode" 
-              className="w-full p-4 rounded-2xl border mb-4 text-center font-bold tracking-widest outline-none focus:border-blue-500 transition-all"
-              value={passcode}
-              onChange={e => setPasscode(e.target.value)}
-              onKeyDown={e => e.key === 'Enter' && handleLogin()}
-            />
-            <button 
-              onClick={handleLogin}
-              className="w-full py-4 bg-blue-600 text-white rounded-2xl font-black uppercase text-xs tracking-widest shadow-lg shadow-blue-900/20 active:scale-95 transition-all"
-            >
-              Verify & Enter
-            </button>
+        <div className="h-screen flex items-center justify-center bg-slate-900">
+          <div className="bg-white p-12 rounded-[3rem] shadow-2xl w-full max-w-sm">
+            <h1 className="text-3xl font-black mb-8 italic tracking-tighter">Clinic<span className="text-blue-600">Flow</span></h1>
+            <input type="password" placeholder="Passcode" className="w-full p-4 rounded-2xl border-2 mb-4 text-center" value={passcode} onChange={e => setPasscode(e.target.value)} />
+            <button onClick={handleLogin} className="w-full py-4 bg-blue-600 text-white rounded-2xl font-bold uppercase">Enter</button>
           </div>
         </div>
       );
 
       return view === 'list' ? (
-        <div className="max-w-4xl mx-auto py-20 px-6 animate-in">
-          <h1 className="text-4xl font-black mb-12 tracking-tighter">Patient <span className="text-blue-600">Hub</span></h1>
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+        <div className="max-w-4xl mx-auto py-24 px-8 animate-in text-slate-800">
+          <h1 className="text-5xl font-black tracking-tighter uppercase italic mb-12">Clinic<span className="text-blue-600">Flow</span></h1>
+          <div className="grid grid-cols-2 gap-8">
             {patients.map(p => (
-              <div key={p.name} onClick={async ()=> {
-                setIsLoading(true);
-                setSelectedPatient(p);
-                const res = await callApi('getPatientHistory', { patientName: p.name });
-                setHistory(res.data);
-                setView('detail');
-                setIsLoading(false);
-              }} className="bg-white p-8 rounded-[2.5rem] shadow-sm border border-slate-100 hover:border-blue-500 transition-all cursor-pointer group active:scale-95">
-                <div className="w-14 h-14 bg-blue-50 text-blue-600 rounded-2xl flex items-center justify-center font-bold text-xl mb-6 group-hover:bg-blue-600 group-hover:text-white transition-colors">
-                  {p.name ? p.name[0] : "?"}
-                </div>
-                <h3 className="font-bold text-xl text-slate-800">{p.name}</h3>
-                <p className="text-xs text-blue-500 font-bold uppercase mt-1">{p.email}</p>
+              <div key={p.name} onClick={()=>openPatient(p)} className="bg-white p-10 rounded-[3.5rem] shadow-sm border border-slate-100 hover:shadow-xl transition-all cursor-pointer">
+                <div className="w-16 h-16 bg-blue-50 text-blue-600 rounded-[2rem] flex items-center justify-center font-black text-2xl mb-4">{p.name[0]}</div>
+                <h3 className="font-black text-2xl">{p.name}</h3>
+                <p className="text-xs text-blue-500 font-bold uppercase">{p.email}</p>
               </div>
             ))}
           </div>
         </div>
       ) : (
-        <div className="h-screen flex flex-col overflow-hidden animate-in">
-          <header className="bg-white border-b px-8 py-4 flex justify-between items-center shrink-0">
-            <div className="flex items-center gap-4">
-              <button onClick={() => setView('list')} className="p-2 hover:bg-slate-100 rounded-xl transition-all"><Icon name="arrow-left"/></button>
-              <h2 className="text-xl font-bold">{selectedPatient?.name}</h2>
-            </div>
-            <div className="flex gap-3">
-              <button onClick={toggleRecording} className={`px-6 py-2 rounded-xl flex items-center gap-3 transition-all ${isRecording ? 'bg-red-500 text-white' : 'bg-blue-600 text-white'}`}>
-                <Icon name={isRecording ? "square" : "mic"} className="w-4 h-4"/><span className="font-bold text-xs uppercase">{isRecording ? "Stop Recording" : "Start Session"}</span>
+        <div className="h-screen flex flex-col animate-in">
+          <header className="bg-white border-b px-8 py-4 flex justify-between items-center">
+            <button onClick={() => setView('list')} className="w-10 h-10 flex items-center justify-center bg-slate-50 rounded-xl"><Icon name="arrow-left"/></button>
+            <div className="flex gap-4 items-center">
+              {audioUrl && <audio src={audioUrl} controls className="h-8 w-48 no-print" />}
+              <button onClick={toggleRecording} className={`px-6 py-2 rounded-xl flex items-center gap-3 ${isRecording ? 'bg-red-500 text-white' : 'bg-blue-600 text-white'}`}>
+                <Icon name={isRecording ? "square" : "mic"}/>
+                <span className="font-bold text-xs uppercase">{isRecording ? "Stop" : "Record"}</span>
               </button>
-              <button onClick={generateSOAP} className="bg-slate-900 text-white px-6 py-2 rounded-xl text-xs font-bold uppercase shadow-lg">Generate SOAP</button>
+              <button onClick={generateSOAP} className="bg-slate-900 text-white px-6 py-2 rounded-xl text-xs font-bold uppercase">Generate SOAP</button>
             </div>
           </header>
-          
+
           <main className="flex-1 flex overflow-hidden">
-            <aside className="w-4/12 bg-white border-r p-6 overflow-y-auto custom-scrollbar">
-               <h3 className="text-[10px] font-black uppercase text-slate-400 tracking-widest mb-4">Latest Intake</h3>
-               <div className="bg-slate-50 p-5 rounded-2xl text-sm leading-relaxed text-slate-600 mb-8 whitespace-pre-wrap">{history?.intakes?.[0]?.summary || "No history found."}</div>
-               <h3 className="text-[10px] font-black uppercase text-slate-400 tracking-widest mb-4">Chart History</h3>
-               {history?.soapNotes?.map((n, i) => (<div key={i} className="p-3 border border-slate-100 rounded-xl mb-3 text-xs italic shadow-sm">{n.content}</div>))}
+            <aside className="w-4/12 bg-white border-r p-6 overflow-y-auto">
+              <h3 className="text-[10px] font-black uppercase text-slate-400 mb-4">Latest Intake</h3>
+              <div className="bg-slate-50 p-5 rounded-2xl text-sm leading-relaxed whitespace-pre-wrap">{history?.intakes?.[0]?.summary || "No data."}</div>
             </aside>
-            
-            <div className="flex-1 p-8 overflow-y-auto custom-scrollbar space-y-8">
+            <div className="flex-1 p-8 overflow-y-auto bg-slate-50/50">
               {currentSoap && (
-                <div className="bg-white rounded-[2.5rem] border shadow-xl overflow-hidden animate-in">
-                  <div className="p-4 border-b flex justify-between bg-white items-center">
-                    <span className="text-xs font-black uppercase text-slate-400">Clinical Review</span>
-                    <button onClick={()=>callApi('saveSoapNote', {patientName: selectedPatient.name, content: currentSoap}).then(()=>alert("Saved to Chart."))} className="bg-emerald-600 text-white px-5 py-2 rounded-xl text-[10px] font-bold uppercase">Save Note</button>
-                  </div>
-                  <textarea value={currentSoap} onChange={e=>setCurrentSoap(e.target.value)} className="w-full h-80 p-8 outline-none text-sm leading-relaxed"/>
+                <div className="bg-white rounded-3xl border shadow-xl p-8 animate-in">
+                  <textarea value={currentSoap} onChange={e=>setCurrentSoap(e.target.value)} className="w-full h-96 outline-none text-sm leading-relaxed custom-scrollbar"/>
                 </div>
               )}
-
-              <div className="bg-white p-8 rounded-[2.5rem] border shadow-sm">
-                <div className="flex justify-between mb-8">
-                  <h3 className="font-bold text-slate-800">HEP Photo Lab</h3>
-                  <button onClick={takeSnapshot} className="bg-blue-50 text-blue-600 px-5 py-2 rounded-xl text-[10px] font-bold uppercase flex items-center gap-2 hover:bg-blue-100 transition-all">
-                    <Icon name="camera" className="w-3 h-3"/> {showCamera ? "Snap Position" : "Open Camera"}
-                  </button>
-                </div>
-                {showCamera && <div className="mb-6 aspect-video bg-black rounded-[2rem] overflow-hidden shadow-2xl"><video ref={videoRef} autoPlay playsInline className="w-full h-full object-cover"/></div>}
-                <div className="grid grid-cols-4 gap-4 mb-6">
-                  {hepPhotos.map((p, i) => <img key={i} src={p} className="aspect-square object-cover rounded-2xl border border-slate-200" alt="HEP snapshot"/>)}
-                  <div onClick={()=>document.getElementById('upl').click()} className="aspect-square bg-slate-50 border-2 border-dashed border-slate-200 rounded-2xl flex items-center justify-center cursor-pointer hover:bg-blue-50 transition-all">
-                    <Icon name="plus" className="text-slate-300"/>
-                    <input id="upl" type="file" hidden multiple onChange={e=>{
-                      const file = e.target.files[0];
-                      if(file) {
-                        const r=new FileReader(); 
-                        r.onload=()=>setHepPhotos(p=>[...p,r.result]); 
-                        r.readAsDataURL(file);
-                      }
-                    }}/>
-                  </div>
-                </div>
-              </div>
             </div>
           </main>
-          {isLoading && (
-            <div className="fixed inset-0 bg-white/80 backdrop-blur-sm z-[300] flex items-center justify-center flex-col gap-4 font-bold text-blue-600 animate-pulse">
-              <Icon name="loader-2" className="animate-spin w-10 h-10"/> Clinical Intelligence Active...
-            </div>
-          )}
+          {isLoading && <div className="fixed inset-0 bg-white/80 backdrop-blur-sm z-[300] flex items-center justify-center flex-col font-black text-blue-600 uppercase text-[10px] animate-pulse"><Icon name="loader-2" className="animate-spin w-10 h-10 mb-2"/> Processing AI...</div>}
+          {statusMsg && <div className="fixed bottom-10 right-10 bg-slate-900 text-white px-8 py-4 rounded-2xl shadow-2xl z-[300] text-[10px] font-black uppercase animate-in">{statusMsg}</div>}
         </div>
       );
     }

@@ -41,7 +41,7 @@
     };
 
     // --- CONFIGURATION ---
-    const VERSION = "1.0";
+    const VERSION = "1.1";
     const apiKey = "AIzaSyCW-UgXFZpbdqp1Cu-k691q7h_nvZu7ovY"; 
     const SCRIPT_URL = "https://script.google.com/macros/s/AKfycbzuebIKaOUaautJwjjofHMQmuLiJRUy3CP4yRXL42pf7d2spujhvBhu16NnZZA2pJkNdw/exec"; 
 
@@ -59,19 +59,45 @@
       const [isRecording, setIsRecording] = useState(false);
       const [isPaused, setIsPaused] = useState(false);
       const [audioUrl, setAudioUrl] = useState(null);
-      const [audioBase64, setAudioBase64] = useState(null);
-      const [audioMime, setAudioMime] = useState("audio/webm");
+      const [transcript, setTranscript] = useState("");
       const [hepPhotos, setHepPhotos] = useState([]);
       const [currentSoap, setCurrentSoap] = useState("");
-      const [superbillData, setSuperbillData] = useState(null);
 
       const mediaRecorderRef = useRef(null);
       const audioChunksRef = useRef([]);
+      const recognitionRef = useRef(null);
 
       const showToast = (msg) => {
         setStatusMsg(msg);
         setTimeout(() => setStatusMsg(null), 6000);
       };
+
+      // Initialize Speech Recognition
+      useEffect(() => {
+        const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+        if (SpeechRecognition) {
+          recognitionRef.current = new SpeechRecognition();
+          recognitionRef.current.continuous = true;
+          recognitionRef.current.interimResults = true;
+          
+          recognitionRef.current.onresult = (event) => {
+            let interimTranscript = "";
+            let finalTranscript = "";
+            for (let i = event.resultIndex; i < event.results.length; ++i) {
+              if (event.results[i].isFinal) {
+                finalTranscript += event.results[i][0].transcript;
+              } else {
+                interimTranscript += event.results[i][0].transcript;
+              }
+            }
+            setTranscript(prev => prev + finalTranscript);
+          };
+
+          recognitionRef.current.onerror = (event) => {
+            console.error("Speech Recognition Error", event.error);
+          };
+        }
+      }, []);
 
       const callApi = async (action, data = {}) => {
         try {
@@ -108,6 +134,8 @@
         if (res.status === 'success') {
           setHistory(res.data);
           setView('detail');
+          setTranscript("");
+          setAudioUrl(null);
         }
         setIsLoading(false);
       };
@@ -117,8 +145,7 @@
           try {
             const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
             const mimeType = MediaRecorder.isTypeSupported('audio/webm') ? 'audio/webm' : 'audio/mp4';
-            setAudioMime(mimeType);
-
+            
             mediaRecorderRef.current = new MediaRecorder(stream, { mimeType });
             audioChunksRef.current = [];
             
@@ -130,17 +157,15 @@
               const blob = new Blob(audioChunksRef.current, { type: mimeType });
               const url = URL.createObjectURL(blob);
               setAudioUrl(url);
-
-              const reader = new FileReader();
-              reader.readAsDataURL(blob);
-              reader.onloadend = () => {
-                setAudioBase64(reader.result.split(',')[1]);
-                showToast("Audio processed. Ready for AI analysis.");
-              };
               stream.getTracks().forEach(t => t.stop());
             };
 
             mediaRecorderRef.current.start();
+            if (recognitionRef.current) {
+              setTranscript("");
+              recognitionRef.current.start();
+            }
+            
             setIsRecording(true);
             setIsPaused(false);
           } catch (e) { alert("Mic Error: " + e.message); }
@@ -148,8 +173,12 @@
           if (mediaRecorderRef.current && mediaRecorderRef.current.state !== "inactive") {
             mediaRecorderRef.current.stop();
           }
+          if (recognitionRef.current) {
+            recognitionRef.current.stop();
+          }
           setIsRecording(false);
           setIsPaused(false);
+          showToast("Transcription complete.");
         }
       };
 
@@ -157,9 +186,11 @@
         if (mediaRecorderRef.current && isRecording) {
           if (isPaused) {
             mediaRecorderRef.current.resume();
+            if (recognitionRef.current) recognitionRef.current.start();
             setIsPaused(false);
           } else {
             mediaRecorderRef.current.pause();
+            if (recognitionRef.current) recognitionRef.current.stop();
             setIsPaused(true);
           }
         }
@@ -184,44 +215,42 @@
         });
       };
 
-      const callGemini = async (prompt, isJson = false) => {
-        const configs = [
-          { version: 'v1beta', model: 'gemini-1.5-flash' },
-          { version: 'v1', model: 'gemini-1.5-flash' },
-          { version: 'v1beta', model: 'gemini-1.5-flash-latest' },
-          { version: 'v1', model: 'gemini-1.5-pro' }
-        ];
-
-        let lastError = "";
-        const cleanMime = audioMime.split(';')[0];
-
-        for (const config of configs) {
-          try {
-            const url = `https://generativelanguage.googleapis.com/${config.version}/models/${config.model}:generateContent?key=${apiKey}`;
-            const payload = {
+      // STABLE TEXT CALLER: Sends the text transcript to Gemini. 
+      // Text endpoints are significantly more stable than multimodal ones.
+      const callGeminiText = async (prompt) => {
+        const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`;
+        
+        try {
+          const res = await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
               contents: [{
-                parts: [
-                  { text: prompt },
-                  { inlineData: { mimeType: cleanMime, data: audioBase64 } }
-                ]
+                parts: [{ text: prompt }]
               }]
-            };
-            if (isJson) payload.generationConfig = { responseMimeType: "application/json" };
-            const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
-            const json = await res.json();
-            if (res.ok && json.candidates?.[0]?.content?.parts?.[0]?.text) return json.candidates[0].content.parts[0].text;
-            lastError = json.error?.message || `Status: ${res.status}`;
-          } catch (e) { lastError = e.message; }
+            })
+          });
+
+          const json = await res.json();
+          if (res.ok && json.candidates?.[0]?.content?.parts?.[0]?.text) {
+            return json.candidates[0].content.parts[0].text;
+          }
+          throw new Error(json.error?.message || "AI Error");
+        } catch (e) {
+          throw new Error(e.message);
         }
-        throw new Error(lastError);
       };
 
       const generateSOAP = async () => {
-        if (!audioBase64) return showToast("No recording found.");
+        if (!transcript) return showToast("No transcript available.");
         setIsLoading(true);
         try {
-          const prompt = "Act as a professional Physical Therapist. Write a detailed SOAP note based on the provided clinical audio. Use S, O, A, and P sections. Be clinical and concise.";
-          const text = await callGemini(prompt);
+          const prompt = `Act as a professional Physical Therapist. Generate a detailed SOAP note based on this clinical session transcript. Use S, O, A, and P sections.
+          
+          TRANSCRIPT:
+          ${transcript}`;
+          
+          const text = await callGeminiText(prompt);
           setCurrentSoap(text);
           showToast("SOAP Note Generated.");
         } catch (e) { 
@@ -277,12 +306,14 @@
                 )}
               </div>
               
-              {audioUrl && !isRecording && (
+              {!isRecording && (
                 <div className="flex items-center gap-2 animate-in">
-                   <button onClick={downloadBackup} className="w-10 h-10 flex items-center justify-center bg-white border border-slate-200 rounded-xl hover:bg-slate-50 text-slate-400" title="Download Audio Backup">
-                    <Icon name="download" className="w-4 h-4"/>
-                  </button>
-                  <button onClick={generateSOAP} disabled={isLoading} className="bg-slate-900 text-white px-6 py-2 h-12 rounded-xl text-xs font-bold uppercase shadow-lg disabled:opacity-50">Generate SOAP</button>
+                   {audioUrl && (
+                     <button onClick={downloadBackup} className="w-10 h-10 flex items-center justify-center bg-white border border-slate-200 rounded-xl hover:bg-slate-50 text-slate-400" title="Download Audio Backup">
+                      <Icon name="download" className="w-4 h-4"/>
+                    </button>
+                   )}
+                  <button onClick={generateSOAP} disabled={isLoading || !transcript} className="bg-slate-900 text-white px-6 py-2 h-12 rounded-xl text-xs font-bold uppercase shadow-lg disabled:opacity-50">Generate SOAP</button>
                 </div>
               )}
             </div>
@@ -302,8 +333,10 @@
                   <div className={`w-20 h-20 bg-red-100 rounded-full flex items-center justify-center mb-6 ${!isPaused ? 'recording-pulse' : ''}`}>
                     <Icon name={isPaused ? "pause" : "mic"} className="w-8 h-8 text-red-600" />
                   </div>
-                  <h3 className="text-xl font-bold text-slate-800 tracking-tight">{isPaused ? 'Session Paused' : 'Listening to Clinical Session...'}</h3>
-                  <p className="text-xs text-slate-400 uppercase font-black tracking-widest mt-2">{isPaused ? 'Ready to resume' : 'Capturing documentation findings'}</p>
+                  <h3 className="text-xl font-bold text-slate-800 tracking-tight">{isPaused ? 'Session Paused' : 'Listening & Transcribing...'}</h3>
+                  <div className="max-w-md text-center mt-4">
+                     <p className="text-sm text-slate-500 italic">"{transcript.slice(-100)}..."</p>
+                  </div>
                 </div>
               )}
 
@@ -311,10 +344,19 @@
                 <div className="bg-blue-600 p-4 rounded-3xl flex items-center justify-between text-white shadow-xl animate-in">
                   <div className="flex items-center gap-4">
                     <Icon name="check-circle" className="w-6 h-6 text-blue-200" />
-                    <div><p className="text-xs font-black uppercase tracking-widest opacity-80">Capture Complete</p><p className="text-sm font-bold">Audio is ready for AI analysis</p></div>
+                    <div><p className="text-xs font-black uppercase tracking-widest opacity-80">Capture Complete</p><p className="text-sm font-bold">Transcript ready for SOAP generation</p></div>
                   </div>
                   <audio src={audioUrl} controls className="h-8 max-w-[200px]" />
                 </div>
+              )}
+
+              {transcript && !isRecording && (
+                 <div className="bg-white p-6 rounded-3xl border shadow-sm">
+                    <h3 className="text-[10px] font-black uppercase text-slate-400 tracking-widest mb-4">Session Transcript</h3>
+                    <div className="max-h-40 overflow-y-auto custom-scrollbar text-sm text-slate-600 bg-slate-50 p-4 rounded-xl italic">
+                      {transcript}
+                    </div>
+                 </div>
               )}
 
               {currentSoap && (

@@ -4,7 +4,6 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>ClinicFlow | Professional Portal</title>
-  <!-- Core Dependencies -->
   <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
   <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
@@ -17,20 +16,13 @@
     .custom-scrollbar::-webkit-scrollbar { width: 6px; }
     .custom-scrollbar::-webkit-scrollbar-track { background: #f1f5f9; }
     .custom-scrollbar::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 10px; }
-    @media print { .no-print { display: none !important; } .superbill-modal { position: absolute; top: 0; left: 0; width: 100%; border: none; } }
     .recording-pulse { animation: pulse 1.5s infinite; }
     @keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.5; } 100% { opacity: 1; } }
+    @media print { .no-print { display: none !important; } }
   </style>
 </head>
 <body>
-  <div id="root">
-    <div class="h-screen flex items-center justify-center bg-slate-50">
-      <div class="text-center space-y-4">
-        <div class="inline-block w-8 h-8 border-4 border-blue-600 border-t-transparent rounded-full animate-spin"></div>
-        <p class="text-sm font-bold text-slate-400 uppercase tracking-widest">Loading ClinicFlow...</p>
-      </div>
-    </div>
-  </div>
+  <div id="root"></div>
 
   <script type="text/babel">
     const { useState, useEffect, useRef } = React;
@@ -41,7 +33,7 @@
     };
 
     // --- CONFIGURATION ---
-    const VERSION = "1.7";
+    const VERSION = "1.8";
     const apiKey = "AIzaSyCW-UgXFZpbdqp1Cu-k691q7h_nvZu7ovY"; 
     const SCRIPT_URL = "https://script.google.com/macros/s/AKfycbzuebIKaOUaautJwjjofHMQmuLiJRUy3CP4yRXL42pf7d2spujhvBhu16NnZZA2pJkNdw/exec"; 
 
@@ -55,7 +47,9 @@
       const [isLoading, setIsLoading] = useState(false);
       const [statusMsg, setStatusMsg] = useState(null);
 
+      // Session States
       const [isRecording, setIsRecording] = useState(false);
+      const [isPaused, setIsPaused] = useState(false);
       const [audioUrl, setAudioUrl] = useState(null);
       const [transcript, setTranscript] = useState("");
       const [hepPhotos, setHepPhotos] = useState([]);
@@ -67,15 +61,17 @@
 
       const showToast = (msg) => {
         setStatusMsg(msg);
-        setTimeout(() => setStatusMsg(null), 8000);
+        setTimeout(() => setStatusMsg(null), 6000);
       };
 
+      // Initialize Native Browser Speech Recognition
       useEffect(() => {
         const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
         if (SpeechRecognition) {
           recognitionRef.current = new SpeechRecognition();
           recognitionRef.current.continuous = true;
           recognitionRef.current.interimResults = true;
+          
           recognitionRef.current.onresult = (event) => {
             let final = "";
             for (let i = event.resultIndex; i < event.results.length; ++i) {
@@ -83,6 +79,7 @@
             }
             setTranscript(prev => prev + final);
           };
+          recognitionRef.current.onerror = (e) => console.error("Speech Recognition Error:", e.error);
         }
       }, []);
 
@@ -92,9 +89,14 @@
             method: 'POST',
             body: JSON.stringify({ action, data, passcode })
           });
-          return await response.json();
+          const json = await response.json();
+          if (json.status === 'error' && json.message === 'Unauthorized') {
+             setIsAuthenticated(false);
+             throw new Error("Invalid Passcode");
+          }
+          return json;
         } catch (e) {
-          alert("Database connection error. Check SCRIPT_URL.");
+          alert("Database Error: " + e.message);
           return { status: 'error' };
         }
       };
@@ -105,8 +107,6 @@
         if (res.status === 'success') {
           setPatients(res.data);
           setIsAuthenticated(true);
-        } else {
-          showToast("Invalid Passcode.");
         }
         setIsLoading(false);
       };
@@ -120,6 +120,7 @@
           setView('detail');
           setTranscript("");
           setAudioUrl(null);
+          setCurrentSoap("");
         }
         setIsLoading(false);
       };
@@ -128,89 +129,108 @@
         if (!isRecording) {
           try {
             const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-            mediaRecorderRef.current = new MediaRecorder(stream);
+            const mimeType = MediaRecorder.isTypeSupported('audio/webm') ? 'audio/webm' : 'audio/mp4';
+            
+            mediaRecorderRef.current = new MediaRecorder(stream, { mimeType });
             audioChunksRef.current = [];
-            mediaRecorderRef.current.ondataavailable = (e) => audioChunksRef.current.push(e.data);
+            
+            mediaRecorderRef.current.ondataavailable = (e) => {
+              if (e.data.size > 0) audioChunksRef.current.push(e.data);
+            };
+            
             mediaRecorderRef.current.onstop = () => {
-              const blob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
+              const blob = new Blob(audioChunksRef.current, { type: mimeType });
               setAudioUrl(URL.createObjectURL(blob));
               stream.getTracks().forEach(t => t.stop());
             };
+
             mediaRecorderRef.current.start();
             if (recognitionRef.current) {
               setTranscript("");
               recognitionRef.current.start();
             }
+            
             setIsRecording(true);
-          } catch (e) { alert("Mic Permission Denied."); }
+            setIsPaused(false);
+          } catch (e) { alert("Microphone access is required."); }
         } else {
           if (mediaRecorderRef.current) mediaRecorderRef.current.stop();
           if (recognitionRef.current) recognitionRef.current.stop();
           setIsRecording(false);
-          showToast("Ready for SOAP generation.");
+          setIsPaused(false);
+          showToast("Transcription captured.");
         }
       };
 
-      // V1.7 - REFINED DUAL-PATH AI CALLER
+      const pauseRecording = () => {
+        if (mediaRecorderRef.current && isRecording) {
+          if (isPaused) {
+            mediaRecorderRef.current.resume();
+            if (recognitionRef.current) recognitionRef.current.start();
+            setIsPaused(false);
+          } else {
+            mediaRecorderRef.current.pause();
+            if (recognitionRef.current) recognitionRef.current.stop();
+            setIsPaused(true);
+          }
+        }
+      };
+
+      // V1.8 - STABLE ENDPOINT RESOLVER
       const callGeminiText = async (prompt) => {
-        const attempts = [
-          { v: 'v1beta', m: 'gemini-1.5-flash' },           // Most common/stable
-          { v: 'v1beta', m: 'gemini-2.0-flash-exp' },       // Latest experimental
-          { v: 'v1beta', m: 'gemini-1.5-flash-8b' },        // High-speed fallback
-          { v: 'v1beta', m: 'gemini-1.5-pro' },             // Premium fallback
-          { v: 'v1', m: 'gemini-1.5-flash' }                // Stable V1 fallback
+        // Only try valid models for the v1beta endpoint which handles flash models correctly
+        const models = [
+          "gemini-2.5-flash-preview-09-2025", 
+          "gemini-1.5-flash"
         ];
         
         let lastError = "";
 
-        for (const config of attempts) {
+        for (const modelId of models) {
           try {
-            const url = `https://generativelanguage.googleapis.com/${config.v}/models/${config.m}:generateContent?key=${apiKey}`;
+            const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelId}:generateContent?key=${apiKey}`;
             const res = await fetch(url, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] })
+              body: JSON.stringify({
+                contents: [{ parts: [{ text: prompt }] }]
+              })
             });
 
             const json = await res.json();
-            
             if (res.ok && json.candidates?.[0]?.content?.parts?.[0]?.text) {
               return json.candidates[0].content.parts[0].text;
             }
-            
-            lastError = json.error?.message || `Server Code: ${res.status}`;
+            lastError = json.error?.message || `Status: ${res.status}`;
           } catch (e) {
             lastError = e.message;
           }
         }
-        
-        throw new Error(`Connection Error: "${lastError}"`);
+        throw new Error(lastError);
       };
 
       const generateSOAP = async () => {
-        if (!transcript) return showToast("No transcript found in session.");
+        if (!transcript) return showToast("No transcript detected. Please record a session first.");
         setIsLoading(true);
         try {
-          const intake = history?.intakes?.[0]?.summary || "No prior intake.";
-          const prompt = `Act as a Physical Therapist. Write a high-quality SOAP note based on the clinical session transcript provided.
+          const intakeContext = history?.intakes?.[0]?.summary || "N/A";
+          const prompt = `Act as an expert Physical Therapist. Generate a high-quality SOAP note from the session transcript.
           
-          PATIENT INTAKE CONTEXT: 
-          ${intake}
-
-          SESSION TRANSCRIPT: 
-          ${transcript}
-
+          INTAKE CONTEXT: ${intakeContext}
+          SESSION TRANSCRIPT: ${transcript}
+          
           OUTPUT FORMAT:
-          S: (Subjective findings)
-          O: (Objective stats/measurements)
-          A: (Assessment/Progress)
-          P: (Plan for next visit)`;
-
+          S: Subjective
+          O: Objective
+          A: Assessment
+          P: Plan
+          Use professional clinical terminology.`;
+          
           const text = await callGeminiText(prompt);
           setCurrentSoap(text);
           showToast("SOAP Note Generated.");
         } catch (e) { 
-          showToast(e.message); 
+          showToast(`AI System Error: ${e.message}`); 
         }
         setIsLoading(false);
       };
@@ -228,9 +248,9 @@
         <div className="h-screen flex items-center justify-center bg-slate-900 p-6">
           <div className="bg-white p-12 rounded-[3rem] shadow-2xl w-full max-sm animate-in">
             <h1 className="text-3xl font-black mb-1 italic tracking-tighter text-center">Clinic<span className="text-blue-600">Flow</span></h1>
-            <p className="text-slate-400 text-[10px] font-black uppercase tracking-[0.2em] mb-8 text-center">Portal v{VERSION}</p>
+            <p className="text-slate-400 text-[10px] font-black uppercase tracking-[0.2em] mb-8 text-center">Secure Portal • v{VERSION}</p>
             <input type="password" placeholder="Passcode" className="w-full p-4 rounded-2xl border-2 mb-4 text-center font-bold outline-none focus:border-blue-500 text-slate-800" value={passcode} onChange={e => setPasscode(e.target.value)} />
-            <button onClick={handleLogin} className="w-full py-4 bg-blue-600 text-white rounded-2xl font-black uppercase text-xs tracking-widest shadow-lg active:scale-95 transition-all">Enter</button>
+            <button onClick={handleLogin} className="w-full py-4 bg-blue-600 text-white rounded-2xl font-black uppercase text-xs tracking-widest shadow-lg active:scale-95 transition-all">Enter Dashboard</button>
           </div>
         </div>
       );
@@ -239,7 +259,7 @@
         <div className="max-w-4xl mx-auto py-24 px-8 animate-in text-slate-800">
           <div className="flex justify-between items-center mb-16">
             <h1 className="text-5xl font-black tracking-tighter uppercase italic">Clinic<span className="text-blue-600">Flow</span></h1>
-            <button onClick={handleLogin} className="p-4 bg-white border border-slate-200 rounded-[2rem] shadow-sm hover:shadow-lg active:scale-90 transition-all"><Icon name="refresh-cw" className={isLoading ? "animate-spin text-blue-600" : ""}/></button>
+            <button onClick={handleLogin} className="p-4 bg-white border border-slate-200 rounded-[2rem] shadow-sm hover:shadow-lg transition-all active:scale-90"><Icon name="refresh-cw" className={isLoading ? "animate-spin text-blue-600" : ""}/></button>
           </div>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
             {patients.map(p => (
@@ -258,43 +278,84 @@
               <button onClick={() => setView('list')} className="w-10 h-10 flex items-center justify-center bg-slate-50 rounded-xl hover:bg-slate-100"><Icon name="arrow-left"/></button>
               <div><h2 className="text-xl font-bold">{selectedPatient.name}</h2><p className="text-[10px] text-blue-500 uppercase font-bold">{selectedPatient.email}</p></div>
             </div>
-            <div className="flex gap-2">
-              <button onClick={toggleRecording} className={`w-12 h-12 rounded-xl flex items-center justify-center transition-all ${isRecording ? 'bg-red-500 text-white' : 'bg-blue-600 text-white'}`}><Icon name={isRecording ? "square" : "mic"}/></button>
-              {!isRecording && transcript && <button onClick={generateSOAP} disabled={isLoading} className="bg-slate-900 text-white px-6 py-2 h-12 rounded-xl text-xs font-bold uppercase shadow-lg disabled:opacity-50">Generate SOAP</button>}
+            
+            <div className="flex gap-2 items-center">
+              <div className="flex bg-slate-100 p-1.5 rounded-2xl gap-1">
+                <button onClick={toggleRecording} className={`w-12 h-12 rounded-xl flex items-center justify-center transition-all ${isRecording ? 'bg-red-500 text-white' : 'bg-blue-600 text-white'}`}>
+                  <Icon name={isRecording ? "square" : "mic"} className="w-5 h-5"/>
+                </button>
+                {isRecording && (
+                  <button onClick={pauseRecording} className={`w-12 h-12 rounded-xl flex items-center justify-center transition-all ${isPaused ? 'bg-amber-500 text-white' : 'bg-slate-300 text-slate-700'}`}>
+                    <Icon name={isPaused ? "play" : "pause"} className="w-5 h-5"/>
+                  </button>
+                )}
+              </div>
+              
+              {!isRecording && transcript && (
+                <button onClick={generateSOAP} disabled={isLoading} className="bg-slate-900 text-white px-6 py-2 h-12 rounded-xl text-xs font-bold uppercase shadow-lg disabled:opacity-50">Generate SOAP</button>
+              )}
             </div>
           </header>
 
           <main className="flex-1 flex overflow-hidden">
             <aside className="w-4/12 bg-white border-r p-6 overflow-y-auto custom-scrollbar">
-              <h3 className="text-[10px] font-black uppercase text-slate-400 mb-4">Latest Intake</h3>
-              <div className="bg-slate-50 p-5 rounded-2xl text-sm leading-relaxed text-slate-600 mb-8 whitespace-pre-wrap">{history?.intakes?.[0]?.summary || "No history found."}</div>
-              <h3 className="text-[10px] font-black uppercase text-slate-400 mb-4 tracking-widest">Previous Notes</h3>
+              <h3 className="text-[10px] font-black uppercase text-slate-400 mb-4 tracking-widest">Initial Assessment</h3>
+              <div className="bg-slate-50 p-5 rounded-2xl text-sm leading-relaxed text-slate-600 mb-8 whitespace-pre-wrap border border-slate-100">{history?.intakes?.[0]?.summary || "No assessment found."}</div>
+              <h3 className="text-[10px] font-black uppercase text-slate-400 mb-4 tracking-widest">Chart History</h3>
               {history?.soapNotes?.map((n, i) => (<div key={i} className="p-3 border border-slate-100 rounded-xl mb-3 text-xs italic text-slate-500 bg-white">"{n.content}"</div>))}
             </aside>
 
             <div className="flex-1 p-8 overflow-y-auto custom-scrollbar space-y-8 bg-slate-50/50">
               {isRecording && (
                 <div className="bg-white p-12 rounded-[3rem] border-2 border-dashed border-red-200 flex flex-col items-center justify-center animate-in">
-                  <div className="w-20 h-20 bg-red-100 rounded-full flex items-center justify-center mb-6 recording-pulse"><Icon name="mic" className="w-8 h-8 text-red-600" /></div>
-                  <h3 className="text-xl font-bold text-slate-800 tracking-tight">Transcribing Session...</h3>
-                  <div className="max-w-md text-center mt-4"><p className="text-sm text-slate-500 italic">"{transcript.slice(-100)}..."</p></div>
+                  <div className={`w-20 h-20 bg-red-100 rounded-full flex items-center justify-center mb-6 ${!isPaused ? 'recording-pulse' : ''}`}>
+                    <Icon name={isPaused ? "pause" : "mic"} className="w-8 h-8 text-red-600" />
+                  </div>
+                  <h3 className="text-xl font-bold text-slate-800 tracking-tight">{isPaused ? 'Paused' : 'Listening & Transcribing...'}</h3>
+                  <div className="max-w-md text-center mt-4">
+                     <p className="text-sm text-slate-500 italic">"{transcript.slice(-100)}..."</p>
+                  </div>
                 </div>
               )}
+
+              {transcript && !isRecording && (
+                 <div className="bg-white p-6 rounded-3xl border shadow-sm">
+                    <h3 className="text-[10px] font-black uppercase text-slate-400 tracking-widest mb-4">Live Transcription Result</h3>
+                    <div className="max-h-40 overflow-y-auto custom-scrollbar text-sm text-slate-600 bg-slate-50 p-4 rounded-xl italic leading-relaxed">
+                      {transcript || "Speak clearly to capture session findings."}
+                    </div>
+                 </div>
+              )}
+
               {currentSoap && (
                 <div className="bg-white rounded-3xl border shadow-xl overflow-hidden animate-in">
-                  <div className="p-4 border-b flex justify-between bg-white items-center"><span className="text-xs font-black uppercase text-slate-400 tracking-widest">Clinical Note</span><button onClick={()=>callApi('saveSoapNote', {patientName: selectedPatient.name, content: currentSoap}).then(()=>showToast("Note Saved"))} className="bg-emerald-600 text-white px-5 py-2 rounded-xl text-[10px] font-bold uppercase shadow-lg">Log to Sheet</button></div>
+                  <div className="p-4 border-b flex justify-between bg-white items-center">
+                    <span className="text-xs font-black uppercase text-slate-400 tracking-widest">Generated SOAP Note</span>
+                    <button onClick={()=>callApi('saveSoapNote', {patientName: selectedPatient.name, content: currentSoap}).then(()=>showToast("Note Saved"))} className="bg-emerald-600 text-white px-5 py-2 rounded-xl text-[10px] font-bold uppercase shadow-lg">Commit to Chart</button>
+                  </div>
                   <textarea value={currentSoap} onChange={e=>setCurrentSoap(e.target.value)} className="w-full h-96 p-8 outline-none text-sm text-slate-700 leading-relaxed font-medium custom-scrollbar"/>
                 </div>
               )}
+
               <div className="bg-white p-8 rounded-[2.5rem] border shadow-sm">
-                <div className="flex justify-between items-center mb-8"><h3 className="font-bold text-slate-800 tracking-tight">HEP Sequencer</h3><button onClick={()=>document.getElementById('upl').click()} className="bg-blue-50 text-blue-600 px-5 py-2 rounded-xl text-[10px] font-bold uppercase flex items-center gap-2 hover:bg-blue-100 transition-all"><Icon name="camera" className="w-3 h-3"/> Upload</button><input id="upl" type="file" hidden multiple accept="image/*" onChange={handlePhotoUpload}/></div>
+                <div className="flex justify-between items-center mb-8">
+                  <h3 className="font-bold text-slate-800 tracking-tight">HEP Photo Sequencer</h3>
+                  <button onClick={()=>document.getElementById('upl').click()} className="bg-blue-50 text-blue-600 px-5 py-2 rounded-xl text-[10px] font-bold uppercase flex items-center gap-2 hover:bg-blue-100"><Icon name="camera" className="w-3 h-3"/> Add Position</button>
+                  <input id="upl" type="file" hidden multiple accept="image/*" onChange={handlePhotoUpload}/>
+                </div>
                 <div className="grid grid-cols-4 gap-4">
-                  {hepPhotos.map((p, i) => (<div key={i} className="relative group animate-in"><img src={p} className="aspect-square object-cover rounded-2xl border border-slate-100 shadow-sm"/><button onClick={()=>setHepPhotos(prev=>prev.filter((_, idx)=>idx!==i))} className="absolute -top-2 -right-2 bg-red-500 text-white rounded-full p-1 opacity-0 group-hover:opacity-100 transition-opacity shadow-lg"><Icon name="x" className="w-3 h-3"/></button></div>))}
+                  {hepPhotos.map((p, i) => (
+                    <div key={i} className="relative group animate-in">
+                      <img src={p} className="aspect-square object-cover rounded-2xl border border-slate-100 shadow-sm"/>
+                      <button onClick={()=>setHepPhotos(prev=>prev.filter((_, idx)=>idx!==i))} className="absolute -top-2 -right-2 bg-red-500 text-white rounded-full p-1 opacity-0 group-hover:opacity-100 shadow-lg"><Icon name="x" className="w-3 h-3"/></button>
+                    </div>
+                  ))}
+                  {hepPhotos.length === 0 && <div className="col-span-4 py-12 text-center text-slate-300 text-xs font-bold uppercase tracking-widest border-2 border-dashed border-slate-100 rounded-3xl">Movement capture ready</div>}
                 </div>
               </div>
             </div>
           </main>
-          {isLoading && <div className="fixed inset-0 bg-white/80 backdrop-blur-sm z-[300] flex items-center justify-center flex-col gap-4 font-black text-blue-600 animate-pulse tracking-[0.3em] uppercase text-[10px]"><Icon name="loader-2" className="animate-spin w-10 h-10 mb-2"/> Processing AI Insight...</div>}
+          {isLoading && <div className="fixed inset-0 bg-white/80 backdrop-blur-sm z-[300] flex items-center justify-center flex-col gap-4 font-black text-blue-600 animate-pulse uppercase text-[10px] tracking-widest"><Icon name="loader-2" className="animate-spin w-10 h-10"/> Synchronizing Clinical Intelligence...</div>}
           {statusMsg && <div className="fixed bottom-10 right-10 bg-slate-900 text-white px-8 py-4 rounded-2xl shadow-2xl z-[300] text-[10px] font-black uppercase border border-slate-700 animate-in tracking-widest">{statusMsg}</div>}
         </div>
       );

@@ -41,7 +41,7 @@
     };
 
     // --- CONFIGURATION ---
-    const VERSION = "1.6";
+    const VERSION = "1.7";
     const apiKey = "AIzaSyCW-UgXFZpbdqp1Cu-k691q7h_nvZu7ovY"; 
     const SCRIPT_URL = "https://script.google.com/macros/s/AKfycbzuebIKaOUaautJwjjofHMQmuLiJRUy3CP4yRXL42pf7d2spujhvBhu16NnZZA2pJkNdw/exec"; 
 
@@ -56,7 +56,6 @@
       const [statusMsg, setStatusMsg] = useState(null);
 
       const [isRecording, setIsRecording] = useState(false);
-      const [isPaused, setIsPaused] = useState(false);
       const [audioUrl, setAudioUrl] = useState(null);
       const [transcript, setTranscript] = useState("");
       const [hepPhotos, setHepPhotos] = useState([]);
@@ -152,17 +151,17 @@
         }
       };
 
-      // V1.6 - DIAGNOSTIC AI CALLER
+      // V1.7 - REFINED DUAL-PATH AI CALLER
       const callGeminiText = async (prompt) => {
-        // Only use the most stable models. '2.5' and '3' are not currently valid public strings.
         const attempts = [
-          { v: 'v1beta', m: 'gemini-1.5-flash' },
-          { v: 'v1beta', m: 'gemini-1.5-flash-latest' },
-          { v: 'v1beta', m: 'gemini-2.0-flash-exp' },
-          { v: 'v1', m: 'gemini-1.5-flash' }
+          { v: 'v1beta', m: 'gemini-1.5-flash' },           // Most common/stable
+          { v: 'v1beta', m: 'gemini-2.0-flash-exp' },       // Latest experimental
+          { v: 'v1beta', m: 'gemini-1.5-flash-8b' },        // High-speed fallback
+          { v: 'v1beta', m: 'gemini-1.5-pro' },             // Premium fallback
+          { v: 'v1', m: 'gemini-1.5-flash' }                // Stable V1 fallback
         ];
         
-        let lastDiagnosticError = "";
+        let lastError = "";
 
         for (const config of attempts) {
           try {
@@ -179,22 +178,34 @@
               return json.candidates[0].content.parts[0].text;
             }
             
-            // Capture the specific error from Google for diagnostics
-            lastDiagnosticError = json.error?.message || `Server Code: ${res.status}`;
+            lastError = json.error?.message || `Server Code: ${res.status}`;
           } catch (e) {
-            lastDiagnosticError = e.message;
+            lastError = e.message;
           }
         }
         
-        throw new Error(`Google rejected the request. Reason: "${lastDiagnosticError}"`);
+        throw new Error(`Connection Error: "${lastError}"`);
       };
 
       const generateSOAP = async () => {
-        if (!transcript) return showToast("No text found in session.");
+        if (!transcript) return showToast("No transcript found in session.");
         setIsLoading(true);
         try {
           const intake = history?.intakes?.[0]?.summary || "No prior intake.";
-          const prompt = `Write a PT SOAP note. Context: ${intake}. Transcript: ${transcript}. Format strictly S, O, A, P.`;
+          const prompt = `Act as a Physical Therapist. Write a high-quality SOAP note based on the clinical session transcript provided.
+          
+          PATIENT INTAKE CONTEXT: 
+          ${intake}
+
+          SESSION TRANSCRIPT: 
+          ${transcript}
+
+          OUTPUT FORMAT:
+          S: (Subjective findings)
+          O: (Objective stats/measurements)
+          A: (Assessment/Progress)
+          P: (Plan for next visit)`;
+
           const text = await callGeminiText(prompt);
           setCurrentSoap(text);
           showToast("SOAP Note Generated.");

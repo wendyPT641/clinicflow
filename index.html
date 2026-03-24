@@ -4,6 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>ClinicFlow | Professional Portal</title>
+  <!-- Core Dependencies -->
   <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
   <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
@@ -14,11 +15,20 @@
     .animate-in { animation: fadeIn 0.4s ease-out; }
     @keyframes fadeIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
     .custom-scrollbar::-webkit-scrollbar { width: 6px; }
+    .custom-scrollbar::-webkit-scrollbar-track { background: #f1f5f9; }
     .custom-scrollbar::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 10px; }
+    @media print { .no-print { display: none !important; } .superbill-modal { position: absolute; top: 0; left: 0; width: 100%; border: none; } }
   </style>
 </head>
 <body>
-  <div id="root"></div>
+  <div id="root">
+    <div class="h-screen flex items-center justify-center bg-slate-50">
+      <div class="text-center space-y-4">
+        <div class="inline-block w-8 h-8 border-4 border-blue-600 border-t-transparent rounded-full animate-spin"></div>
+        <p class="text-sm font-bold text-slate-400 uppercase tracking-widest">Initializing ClinicFlow v5.3...</p>
+      </div>
+    </div>
+  </div>
 
   <script type="text/babel">
     const { useState, useEffect, useRef } = React;
@@ -44,10 +54,12 @@
 
       // Session States
       const [isRecording, setIsRecording] = useState(false);
-      const [audioUrl, setAudioUrl] = useState(null); // NEW: Visual playback
+      const [audioUrl, setAudioUrl] = useState(null);
       const [audioBase64, setAudioBase64] = useState(null);
       const [audioMime, setAudioMime] = useState("audio/webm");
+      const [hepPhotos, setHepPhotos] = useState([]);
       const [currentSoap, setCurrentSoap] = useState("");
+      const [superbillData, setSuperbillData] = useState(null);
 
       const mediaRecorderRef = useRef(null);
       const audioChunksRef = useRef([]);
@@ -64,9 +76,13 @@
             body: JSON.stringify({ action, data, passcode })
           });
           const json = await response.json();
+          if (json.status === 'error' && json.message === 'Unauthorized') {
+             setIsAuthenticated(false);
+             throw new Error("Invalid Passcode");
+          }
           return json;
         } catch (e) {
-          alert("Database Error: Check your SCRIPT_URL");
+          alert("Database Error: " + e.message);
           return { status: 'error' };
         }
       };
@@ -102,18 +118,20 @@
             mediaRecorderRef.current = new MediaRecorder(stream, { mimeType });
             audioChunksRef.current = [];
             
-            mediaRecorderRef.current.ondataavailable = (e) => audioChunksRef.current.push(e.data);
+            mediaRecorderRef.current.ondataavailable = (e) => {
+              if (e.data.size > 0) audioChunksRef.current.push(e.data);
+            };
             
             mediaRecorderRef.current.onstop = () => {
               const blob = new Blob(audioChunksRef.current, { type: mimeType });
               const url = URL.createObjectURL(blob);
-              setAudioUrl(url); // Sets visual player
+              setAudioUrl(url);
 
               const reader = new FileReader();
               reader.readAsDataURL(blob);
               reader.onloadend = () => {
                 setAudioBase64(reader.result.split(',')[1]);
-                showToast("Recording saved to memory. Ready for AI.");
+                showToast("Audio processed. Ready for AI.");
               };
               stream.getTracks().forEach(t => t.stop());
             };
@@ -122,85 +140,189 @@
             setIsRecording(true);
           } catch (e) { alert("Mic Error: " + e.message); }
         } else {
-          mediaRecorderRef.current.stop();
+          if (mediaRecorderRef.current && mediaRecorderRef.current.state !== "inactive") {
+            mediaRecorderRef.current.stop();
+          }
           setIsRecording(false);
         }
       };
 
-      const callGemini = async (prompt) => {
-        const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`;
-        const payload = {
-          contents: [{ parts: [{ text: prompt }, { inlineData: { mimeType: audioMime, data: audioBase64 } }] }]
-        };
-        const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
-        const json = await res.json();
-        if (!res.ok) throw new Error(json.error?.message || "AI Error");
-        return json.candidates[0].content.parts[0].text;
+      const handlePhotoUpload = (e) => {
+        const files = Array.from(e.target.files);
+        files.forEach(file => {
+          const reader = new FileReader();
+          reader.onload = () => setHepPhotos(prev => [...prev, reader.result]);
+          reader.readAsDataURL(file);
+        });
+      };
+
+      const callGemini = async (prompt, isJson = false) => {
+        const variants = [
+          { v: 'v1beta', m: 'gemini-1.5-flash' },
+          { v: 'v1', m: 'gemini-1.5-flash' }
+        ];
+
+        let lastError = "";
+        for (const config of variants) {
+          try {
+            const url = `https://generativelanguage.googleapis.com/${config.v}/models/${config.m}:generateContent?key=${apiKey}`;
+            const payload = {
+              contents: [{ parts: [{ text: prompt }, { inlineData: { mimeType: audioMime, data: audioBase64 } }] }]
+            };
+            if (isJson) payload.generationConfig = { responseMimeType: "application/json" };
+
+            const res = await fetch(url, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(payload)
+            });
+
+            const json = await res.json();
+            if (res.ok && json.candidates?.[0]?.content?.parts?.[0]?.text) {
+              return json.candidates[0].content.parts[0].text;
+            }
+            lastError = json.error?.message || `Status: ${res.status}`;
+          } catch (e) { lastError = e.message; }
+        }
+        throw new Error(lastError);
       };
 
       const generateSOAP = async () => {
         if (!audioBase64) return showToast("No recording found.");
         setIsLoading(true);
         try {
-          const text = await callGemini("Write a professional PT/MLD SOAP note from this audio.");
+          const text = await callGemini("Write a professional Physical Therapy/MLD SOAP note based on the audio. Focus on clinical findings. No intro.");
           setCurrentSoap(text);
           showToast("SOAP Note Generated.");
         } catch (e) { showToast(`AI Error: ${e.message}`); }
         setIsLoading(false);
       };
 
+      const generateSuperbill = async () => {
+        if (!audioBase64) return showToast("No recording found.");
+        setIsLoading(true);
+        try {
+          const rawText = await callGemini("Identify CPT codes and justifications. Return JSON: { \"codes\": [{ \"code\": \"...\", \"desc\": \"...\", \"justification\": \"...\" }] }", true);
+          const data = JSON.parse(rawText.replace(/```json|```/g, "").trim());
+          const subtotal = data.codes.length * 70;
+          setSuperbillData({ ...data, subtotal, adjustment: subtotal - 250, total: 250, date: new Date().toLocaleDateString(), invoiceId: `INV-${Date.now().toString().slice(-4)}` });
+        } catch (e) { showToast(`Billing Error: ${e.message}`); }
+        setIsLoading(false);
+      };
+
       if (!isAuthenticated) return (
-        <div className="h-screen flex items-center justify-center bg-slate-900">
-          <div className="bg-white p-12 rounded-[3rem] shadow-2xl w-full max-w-sm">
-            <h1 className="text-3xl font-black mb-8 italic tracking-tighter">Clinic<span className="text-blue-600">Flow</span></h1>
-            <input type="password" placeholder="Passcode" className="w-full p-4 rounded-2xl border-2 mb-4 text-center" value={passcode} onChange={e => setPasscode(e.target.value)} />
-            <button onClick={handleLogin} className="w-full py-4 bg-blue-600 text-white rounded-2xl font-bold uppercase">Enter</button>
+        <div className="h-screen flex items-center justify-center bg-slate-900 p-6">
+          <div className="bg-white p-12 rounded-[3rem] shadow-2xl w-full max-w-sm animate-in">
+            <h1 className="text-3xl font-black mb-1 italic tracking-tighter">Clinic<span className="text-blue-600">Flow</span></h1>
+            <p className="text-slate-400 text-[10px] font-black uppercase tracking-[0.2em] mb-8 text-center">Secure Clinician Access</p>
+            <input type="password" placeholder="Passcode" className="w-full p-4 rounded-2xl border-2 mb-4 text-center font-bold outline-none focus:border-blue-500 text-slate-800" value={passcode} onChange={e => setPasscode(e.target.value)} />
+            <button onClick={handleLogin} className="w-full py-4 bg-blue-600 text-white rounded-2xl font-black uppercase text-xs tracking-widest shadow-lg active:scale-95 transition-all">Enter Dashboard</button>
           </div>
         </div>
       );
 
       return view === 'list' ? (
         <div className="max-w-4xl mx-auto py-24 px-8 animate-in text-slate-800">
-          <h1 className="text-5xl font-black tracking-tighter uppercase italic mb-12">Clinic<span className="text-blue-600">Flow</span></h1>
-          <div className="grid grid-cols-2 gap-8">
+          <div className="flex justify-between items-center mb-16">
+            <h1 className="text-5xl font-black tracking-tighter uppercase italic">Clinic<span className="text-blue-600">Flow</span></h1>
+            <button onClick={() => handleLogin()} className="p-4 bg-white border border-slate-200 rounded-[2rem] shadow-sm hover:shadow-lg transition-all active:scale-90"><Icon name="refresh-cw" className={isLoading ? "animate-spin text-blue-600" : ""}/></button>
+          </div>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
             {patients.map(p => (
-              <div key={p.name} onClick={()=>openPatient(p)} className="bg-white p-10 rounded-[3.5rem] shadow-sm border border-slate-100 hover:shadow-xl transition-all cursor-pointer">
-                <div className="w-16 h-16 bg-blue-50 text-blue-600 rounded-[2rem] flex items-center justify-center font-black text-2xl mb-4">{p.name[0]}</div>
-                <h3 className="font-black text-2xl">{p.name}</h3>
-                <p className="text-xs text-blue-500 font-bold uppercase">{p.email}</p>
+              <div key={p.name} onClick={()=>openPatient(p)} className="bg-white p-10 rounded-[3.5rem] shadow-sm border border-slate-100 hover:border-blue-500 hover:shadow-2xl transition-all cursor-pointer group active:scale-95">
+                <div className="w-16 h-16 bg-blue-50 text-blue-600 rounded-[2rem] flex items-center justify-center font-black text-2xl mb-8 group-hover:bg-blue-600 group-hover:text-white transition-colors">{p.name[0]}</div>
+                <h3 className="font-black text-2xl text-slate-800 tracking-tight">{p.name}</h3>
+                <p className="text-xs text-blue-500 font-bold uppercase tracking-widest mt-2">{p.email}</p>
               </div>
             ))}
           </div>
         </div>
       ) : (
-        <div className="h-screen flex flex-col animate-in">
-          <header className="bg-white border-b px-8 py-4 flex justify-between items-center">
-            <button onClick={() => setView('list')} className="w-10 h-10 flex items-center justify-center bg-slate-50 rounded-xl"><Icon name="arrow-left"/></button>
+        <div className="h-screen flex flex-col overflow-hidden animate-in">
+          <header className="bg-white border-b px-8 py-4 flex justify-between items-center shrink-0">
+            <div className="flex items-center gap-4">
+              <button onClick={() => setView('list')} className="w-10 h-10 flex items-center justify-center bg-slate-50 rounded-xl hover:bg-slate-100 transition-all"><Icon name="arrow-left"/></button>
+              <div><h2 className="text-xl font-bold">{selectedPatient.name}</h2><p className="text-[10px] text-blue-500 uppercase font-bold">{selectedPatient.email}</p></div>
+            </div>
             <div className="flex gap-4 items-center">
               {audioUrl && <audio src={audioUrl} controls className="h-8 w-48 no-print" />}
-              <button onClick={toggleRecording} className={`px-6 py-2 rounded-xl flex items-center gap-3 ${isRecording ? 'bg-red-500 text-white' : 'bg-blue-600 text-white'}`}>
-                <Icon name={isRecording ? "square" : "mic"}/>
-                <span className="font-bold text-xs uppercase">{isRecording ? "Stop" : "Record"}</span>
+              <button onClick={toggleRecording} className={`px-6 py-2 rounded-xl flex items-center gap-3 transition-all ${isRecording ? 'bg-red-500 text-white shadow-lg' : 'bg-blue-600 text-white shadow-md'}`}>
+                <Icon name={isRecording ? "square" : "mic"} className="w-4 h-4"/><span className="font-bold text-xs uppercase tracking-widest">{isRecording ? "Stop" : "Record"}</span>
               </button>
-              <button onClick={generateSOAP} className="bg-slate-900 text-white px-6 py-2 rounded-xl text-xs font-bold uppercase">Generate SOAP</button>
+              <button onClick={generateSOAP} disabled={!audioBase64 || isLoading} className="bg-slate-900 text-white px-6 py-2 rounded-xl text-xs font-bold uppercase shadow-lg disabled:opacity-30">Generate SOAP</button>
             </div>
           </header>
 
           <main className="flex-1 flex overflow-hidden">
-            <aside className="w-4/12 bg-white border-r p-6 overflow-y-auto">
-              <h3 className="text-[10px] font-black uppercase text-slate-400 mb-4">Latest Intake</h3>
-              <div className="bg-slate-50 p-5 rounded-2xl text-sm leading-relaxed whitespace-pre-wrap">{history?.intakes?.[0]?.summary || "No data."}</div>
+            <aside className="w-4/12 bg-white border-r p-6 overflow-y-auto custom-scrollbar">
+              <h3 className="text-[10px] font-black uppercase text-slate-400 tracking-widest mb-4">Latest Intake</h3>
+              <div className="bg-slate-50 p-5 rounded-2xl text-sm leading-relaxed text-slate-600 mb-8 whitespace-pre-wrap border border-slate-100 shadow-inner">{history?.intakes?.[0]?.summary || "No assessment found."}</div>
+              <h3 className="text-[10px] font-black uppercase text-slate-400 tracking-widest mb-4">Past Session History</h3>
+              {history?.soapNotes?.map((n, i) => (<div key={i} className="p-3 border border-slate-100 rounded-xl mb-3 text-xs italic text-slate-500 bg-white shadow-sm">"{n.content}"</div>))}
             </aside>
-            <div className="flex-1 p-8 overflow-y-auto bg-slate-50/50">
+
+            <div className="flex-1 p-8 overflow-y-auto custom-scrollbar space-y-8 bg-slate-50/50">
               {currentSoap && (
-                <div className="bg-white rounded-3xl border shadow-xl p-8 animate-in">
-                  <textarea value={currentSoap} onChange={e=>setCurrentSoap(e.target.value)} className="w-full h-96 outline-none text-sm leading-relaxed custom-scrollbar"/>
+                <div className="bg-white rounded-3xl border shadow-xl overflow-hidden animate-in">
+                  <div className="p-4 border-b flex justify-between bg-white items-center"><span className="text-xs font-black uppercase text-slate-400 tracking-widest">Clinical Progression Note</span><button onClick={()=>callApi('saveSoapNote', {patientName: selectedPatient.name, content: currentSoap}).then(()=>showToast("Note Logged"))} className="bg-emerald-600 text-white px-5 py-2 rounded-xl text-[10px] font-bold uppercase shadow-lg">Save to Sheet</button></div>
+                  <textarea value={currentSoap} onChange={e=>setCurrentSoap(e.target.value)} className="w-full h-80 p-8 outline-none text-sm text-slate-700 leading-relaxed font-medium custom-scrollbar"/>
                 </div>
               )}
+
+              {/* HEP Photo Sequencer */}
+              <div className="bg-white p-8 rounded-[2.5rem] border shadow-sm">
+                <div className="flex justify-between items-center mb-8">
+                  <h3 className="font-bold text-slate-800 tracking-tight">HEP Photo Sequencer</h3>
+                  <button onClick={()=>document.getElementById('upl').click()} className="bg-blue-50 text-blue-600 px-5 py-2 rounded-xl text-[10px] font-bold uppercase flex items-center gap-2 hover:bg-blue-100 transition-all"><Icon name="camera" className="w-3 h-3"/> Upload Movement</button>
+                  <input id="upl" type="file" hidden multiple accept="image/*" onChange={handlePhotoUpload}/>
+                </div>
+                <div className="grid grid-cols-4 gap-4 mb-6">
+                  {hepPhotos.map((p, i) => (
+                    <div key={i} className="relative group animate-in">
+                      <img src={p} className="aspect-square object-cover rounded-2xl border border-slate-100 shadow-sm"/>
+                      <button onClick={()=>setHepPhotos(prev=>prev.filter((_, idx)=>idx!==i))} className="absolute -top-2 -right-2 bg-red-500 text-white rounded-full p-1 opacity-0 group-hover:opacity-100 transition-opacity shadow-lg">
+                        <Icon name="x" className="w-3 h-3"/>
+                      </button>
+                    </div>
+                  ))}
+                  {hepPhotos.length === 0 && <div className="col-span-4 py-12 text-center text-slate-300 text-xs font-bold uppercase tracking-widest border-2 border-dashed border-slate-100 rounded-3xl">Ready for Movement Sequences</div>}
+                </div>
+                <button className="w-full py-4 bg-slate-900 text-white rounded-2xl font-bold text-xs uppercase tracking-widest shadow-lg active:scale-[0.98] transition-all">Construct Program Guide</button>
+              </div>
+
+              <div className="grid grid-cols-3 gap-6">
+                <button onClick={generateSuperbill} disabled={!audioBase64 || isLoading} className="bg-white border border-slate-200 p-8 rounded-[2.5rem] flex flex-col items-center gap-4 hover:border-blue-400 hover:shadow-xl transition-all group active:scale-95 shadow-sm disabled:opacity-30">
+                  <div className="w-14 h-14 bg-blue-50 rounded-2xl flex items-center justify-center text-slate-400 group-hover:bg-blue-600 group-hover:text-white transition-colors"><Icon name="file-badge"/></div>
+                  <span className="text-[10px] font-bold uppercase text-slate-500 text-center">Generate Superbill</span>
+                </button>
+              </div>
             </div>
           </main>
-          {isLoading && <div className="fixed inset-0 bg-white/80 backdrop-blur-sm z-[300] flex items-center justify-center flex-col font-black text-blue-600 uppercase text-[10px] animate-pulse"><Icon name="loader-2" className="animate-spin w-10 h-10 mb-2"/> Processing AI...</div>}
-          {statusMsg && <div className="fixed bottom-10 right-10 bg-slate-900 text-white px-8 py-4 rounded-2xl shadow-2xl z-[300] text-[10px] font-black uppercase animate-in">{statusMsg}</div>}
+
+          {superbillData && (
+            <div className="fixed inset-0 bg-slate-900/70 backdrop-blur-md z-[200] flex items-center justify-center p-4 no-print">
+              <div className="bg-white w-full max-w-2xl rounded-[3rem] shadow-2xl overflow-hidden animate-in superbill-modal">
+                <div className="p-6 border-b flex justify-between items-center bg-slate-50"><h3 className="font-bold text-[10px] uppercase tracking-widest text-slate-400">Superbill Preview</h3><div className="flex gap-2"><button onClick={() => window.print()} className="bg-blue-600 text-white px-5 py-2 rounded-xl text-xs font-bold uppercase flex items-center gap-2 shadow-lg"><Icon name="printer" className="w-3 h-3"/> Print</button><button onClick={() => setSuperbillData(null)} className="bg-white border px-5 py-2 rounded-xl text-xs font-bold uppercase">Close</button></div></div>
+                <div className="p-16 bg-white text-black font-serif">
+                   <div className="flex justify-between mb-12 font-sans text-slate-900">
+                     <div className="space-y-1"><h1 className="text-xl font-black uppercase tracking-tight text-slate-800">ClinicFlow Physical Therapy</h1></div>
+                     <div className="text-right"><h2 className="text-3xl font-black text-slate-100 uppercase italic">Superbill</h2><p className="text-[10px] font-bold text-slate-400 mt-2">Date: {superbillData.date}</p></div>
+                   </div>
+                   <table className="w-full border-t-2 border-black mb-8 font-sans">
+                     <thead><tr className="text-left text-[10px] uppercase font-black text-slate-400"><th className="py-3">CPT Code</th><th className="py-3">Description</th><th className="py-3 text-right">Fee</th></tr></thead>
+                     <tbody>{superbillData.codes.map((c, i) => (<tr key={i} className="border-t border-slate-100 font-sans"><td className="py-4 font-bold text-sm">{c.code}</td><td className="py-4 pr-6 leading-relaxed"><b>{c.desc}</b><br/><span className="text-[10px] italic text-slate-500 leading-tight">{c.justification}</span></td><td className="py-4 text-right font-mono text-sm">$70.00</td></tr>))}</tbody>
+                   </table>
+                   <div className="flex justify-end flex-col items-end font-sans">
+                     <p className="text-xs text-slate-400 mb-1">Subtotal: ${superbillData.subtotal.toFixed(2)}</p>
+                     <p className="text-xs text-emerald-600 font-bold mb-2 tracking-widest uppercase">Self-Pay Adj: -${superbillData.adjustment.toFixed(2)}</p>
+                     <div className="text-2xl font-black border-t-4 border-black pt-2">Total Paid: $250.00</div>
+                   </div>
+                </div>
+              </div>
+            </div>
+          )}
+          {isLoading && <div className="fixed inset-0 bg-white/80 backdrop-blur-sm z-[300] flex items-center justify-center flex-col gap-4 font-black text-blue-600 animate-pulse tracking-[0.3em] uppercase text-[10px]"><Icon name="loader-2" className="animate-spin w-10 h-10 mb-2"/> Processing AI Pipeline...</div>}
+          {statusMsg && <div className="fixed bottom-10 right-10 bg-slate-900 text-white px-8 py-4 rounded-2xl shadow-2xl z-[300] text-[10px] font-black uppercase border border-slate-700 animate-in tracking-widest">{statusMsg}</div>}
         </div>
       );
     }

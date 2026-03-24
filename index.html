@@ -41,7 +41,7 @@
     };
 
     // --- CONFIGURATION ---
-    const VERSION = "1.1";
+    const VERSION = "1.3";
     const apiKey = "AIzaSyCW-UgXFZpbdqp1Cu-k691q7h_nvZu7ovY"; 
     const SCRIPT_URL = "https://script.google.com/macros/s/AKfycbzuebIKaOUaautJwjjofHMQmuLiJRUy3CP4yRXL42pf7d2spujhvBhu16NnZZA2pJkNdw/exec"; 
 
@@ -215,40 +215,59 @@
         });
       };
 
-      // STABLE TEXT CALLER: Sends the text transcript to Gemini. 
-      // Text endpoints are significantly more stable than multimodal ones.
+      // IMPROVED: Smart Fallback System for multiple Gemini models
       const callGeminiText = async (prompt) => {
-        const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`;
+        const modelsToTry = [
+          "gemini-2.5-flash-preview-09-2025", // Internal Preview Stable
+          "gemini-2.5-flash",                 // Requested Stable
+          "gemini-2.5-flash-lite",            // Requested Lite
+          "gemini-3-flash-preview",           // Requested Preview
+          "gemini-1.5-flash"                  // Standard Public Fallback
+        ];
         
-        try {
-          const res = await fetch(url, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              contents: [{
-                parts: [{ text: prompt }]
-              }]
-            })
-          });
+        let lastError = "";
 
-          const json = await res.json();
-          if (res.ok && json.candidates?.[0]?.content?.parts?.[0]?.text) {
-            return json.candidates[0].content.parts[0].text;
+        for (const modelId of modelsToTry) {
+          const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelId}:generateContent?key=${apiKey}`;
+          try {
+            const res = await fetch(url, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                contents: [{
+                  parts: [{ text: prompt }]
+                }]
+              })
+            });
+
+            const json = await res.json();
+            if (res.ok && json.candidates?.[0]?.content?.parts?.[0]?.text) {
+              console.log(`Successfully used model: ${modelId}`);
+              return json.candidates[0].content.parts[0].text;
+            }
+            lastError = json.error?.message || `Error with ${modelId}`;
+          } catch (e) {
+            lastError = e.message;
           }
-          throw new Error(json.error?.message || "AI Error");
-        } catch (e) {
-          throw new Error(e.message);
         }
+        
+        throw new Error(lastError || "Could not connect to any available AI models.");
       };
 
       const generateSOAP = async () => {
         if (!transcript) return showToast("No transcript available.");
         setIsLoading(true);
         try {
-          const prompt = `Act as a professional Physical Therapist. Generate a detailed SOAP note based on this clinical session transcript. Use S, O, A, and P sections.
+          const intakeContext = history?.intakes?.[0]?.summary || "No intake data provided.";
+          const prompt = `Act as a professional Physical Therapist. Generate a detailed clinical SOAP note based on the provided session transcript. Consider the patient's initial intake summary for context.
           
-          TRANSCRIPT:
-          ${transcript}`;
+          INTAKE SUMMARY FOR CONTEXT:
+          ${intakeContext}
+
+          SESSION TRANSCRIPT:
+          ${transcript}
+          
+          Format the output strictly with S:, O:, A:, and P: sections. Use clinical terminology.`;
           
           const text = await callGeminiText(prompt);
           setCurrentSoap(text);

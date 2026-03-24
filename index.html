@@ -41,7 +41,7 @@
     };
 
     // --- CONFIGURATION ---
-    const VERSION = "1.5";
+    const VERSION = "1.6";
     const apiKey = "AIzaSyCW-UgXFZpbdqp1Cu-k691q7h_nvZu7ovY"; 
     const SCRIPT_URL = "https://script.google.com/macros/s/AKfycbzuebIKaOUaautJwjjofHMQmuLiJRUy3CP4yRXL42pf7d2spujhvBhu16NnZZA2pJkNdw/exec"; 
 
@@ -55,7 +55,6 @@
       const [isLoading, setIsLoading] = useState(false);
       const [statusMsg, setStatusMsg] = useState(null);
 
-      // Session States
       const [isRecording, setIsRecording] = useState(false);
       const [isPaused, setIsPaused] = useState(false);
       const [audioUrl, setAudioUrl] = useState(null);
@@ -69,27 +68,22 @@
 
       const showToast = (msg) => {
         setStatusMsg(msg);
-        setTimeout(() => setStatusMsg(null), 6000);
+        setTimeout(() => setStatusMsg(null), 8000);
       };
 
-      // Initialize Speech Recognition
       useEffect(() => {
         const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
         if (SpeechRecognition) {
           recognitionRef.current = new SpeechRecognition();
           recognitionRef.current.continuous = true;
           recognitionRef.current.interimResults = true;
-          
           recognitionRef.current.onresult = (event) => {
-            let interim = "";
             let final = "";
             for (let i = event.resultIndex; i < event.results.length; ++i) {
               if (event.results[i].isFinal) final += event.results[i][0].transcript;
-              else interim += event.results[i][0].transcript;
             }
             setTranscript(prev => prev + final);
           };
-          recognitionRef.current.onerror = (e) => console.error("Speech Error", e.error);
         }
       }, []);
 
@@ -99,14 +93,9 @@
             method: 'POST',
             body: JSON.stringify({ action, data, passcode })
           });
-          const json = await response.json();
-          if (json.status === 'error' && json.message === 'Unauthorized') {
-             setIsAuthenticated(false);
-             throw new Error("Invalid Passcode");
-          }
-          return json;
+          return await response.json();
         } catch (e) {
-          alert("Database Error: " + e.message);
+          alert("Database connection error. Check SCRIPT_URL.");
           return { status: 'error' };
         }
       };
@@ -117,6 +106,8 @@
         if (res.status === 'success') {
           setPatients(res.data);
           setIsAuthenticated(true);
+        } else {
+          showToast("Invalid Passcode.");
         }
         setIsLoading(false);
       };
@@ -138,12 +129,11 @@
         if (!isRecording) {
           try {
             const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-            const mimeType = MediaRecorder.isTypeSupported('audio/webm') ? 'audio/webm' : 'audio/mp4';
-            mediaRecorderRef.current = new MediaRecorder(stream, { mimeType });
+            mediaRecorderRef.current = new MediaRecorder(stream);
             audioChunksRef.current = [];
             mediaRecorderRef.current.ondataavailable = (e) => audioChunksRef.current.push(e.data);
             mediaRecorderRef.current.onstop = () => {
-              const blob = new Blob(audioChunksRef.current, { type: mimeType });
+              const blob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
               setAudioUrl(URL.createObjectURL(blob));
               stream.getTracks().forEach(t => t.stop());
             };
@@ -153,49 +143,29 @@
               recognitionRef.current.start();
             }
             setIsRecording(true);
-            setIsPaused(false);
           } catch (e) { alert("Mic Permission Denied."); }
         } else {
           if (mediaRecorderRef.current) mediaRecorderRef.current.stop();
           if (recognitionRef.current) recognitionRef.current.stop();
           setIsRecording(false);
-          setIsPaused(false);
-          showToast("Transcription complete.");
+          showToast("Ready for SOAP generation.");
         }
       };
 
-      const pauseRecording = () => {
-        if (mediaRecorderRef.current && isRecording) {
-          if (isPaused) {
-            mediaRecorderRef.current.resume();
-            if (recognitionRef.current) recognitionRef.current.start();
-            setIsPaused(false);
-          } else {
-            mediaRecorderRef.current.pause();
-            if (recognitionRef.current) recognitionRef.current.stop();
-            setIsPaused(true);
-          }
-        }
-      };
-
-      // V1.5 - AGGRESSIVE MULTI-PASS AI CALLER
+      // V1.6 - DIAGNOSTIC AI CALLER
       const callGeminiText = async (prompt) => {
+        // Only use the most stable models. '2.5' and '3' are not currently valid public strings.
         const attempts = [
-          { v: 'v1beta', m: 'gemini-2.5-flash' },
-          { v: 'v1beta', m: 'gemini-2.5-flash-lite' },
-          { v: 'v1beta', m: 'gemini-3-flash-preview' },
           { v: 'v1beta', m: 'gemini-1.5-flash' },
-          { v: 'v1beta', m: 'gemini-2.5-flash-preview-09-2025' },
-          { v: 'v1', m: 'gemini-1.5-flash' },
-          { v: 'v1', m: 'gemini-1.5-pro' },
-          { v: 'v1beta', m: 'gemini-1.5-pro' }
+          { v: 'v1beta', m: 'gemini-1.5-flash-latest' },
+          { v: 'v1beta', m: 'gemini-2.0-flash-exp' },
+          { v: 'v1', m: 'gemini-1.5-flash' }
         ];
         
-        let triedList = [];
+        let lastDiagnosticError = "";
 
         for (const config of attempts) {
           try {
-            triedList.push(`${config.v}/${config.m}`);
             const url = `https://generativelanguage.googleapis.com/${config.v}/models/${config.m}:generateContent?key=${apiKey}`;
             const res = await fetch(url, {
               method: 'POST',
@@ -204,33 +174,32 @@
             });
 
             const json = await res.json();
+            
             if (res.ok && json.candidates?.[0]?.content?.parts?.[0]?.text) {
-              console.log(`Success: ${config.m} (${config.v})`);
               return json.candidates[0].content.parts[0].text;
             }
+            
+            // Capture the specific error from Google for diagnostics
+            lastDiagnosticError = json.error?.message || `Server Code: ${res.status}`;
           } catch (e) {
-            console.error(`Failed ${config.m}:`, e);
+            lastDiagnosticError = e.message;
           }
         }
         
-        throw new Error(`AI unavailable. Tried: ${triedList.join(', ')}. Please check if your API Key is active in Google AI Studio.`);
+        throw new Error(`Google rejected the request. Reason: "${lastDiagnosticError}"`);
       };
 
       const generateSOAP = async () => {
-        if (!transcript) return showToast("Nothing recorded to generate from.");
+        if (!transcript) return showToast("No text found in session.");
         setIsLoading(true);
         try {
-          const intake = history?.intakes?.[0]?.summary || "N/A";
-          const prompt = `Act as a Physical Therapist. Write a professional SOAP note. 
-          CONTEXT: Intake summary: ${intake}.
-          TRANSCRIPT: ${transcript}.
-          Format strictly with S, O, A, P.`;
-          
+          const intake = history?.intakes?.[0]?.summary || "No prior intake.";
+          const prompt = `Write a PT SOAP note. Context: ${intake}. Transcript: ${transcript}. Format strictly S, O, A, P.`;
           const text = await callGeminiText(prompt);
           setCurrentSoap(text);
           showToast("SOAP Note Generated.");
         } catch (e) { 
-          showToast(`AI Error: ${e.message}`); 
+          showToast(e.message); 
         }
         setIsLoading(false);
       };
@@ -247,10 +216,10 @@
       if (!isAuthenticated) return (
         <div className="h-screen flex items-center justify-center bg-slate-900 p-6">
           <div className="bg-white p-12 rounded-[3rem] shadow-2xl w-full max-sm animate-in">
-            <h1 className="text-3xl font-black mb-1 italic tracking-tighter">Clinic<span className="text-blue-600">Flow</span></h1>
-            <p className="text-slate-400 text-[10px] font-black uppercase tracking-[0.2em] mb-8 text-center">Secure Clinician Access • v{VERSION}</p>
+            <h1 className="text-3xl font-black mb-1 italic tracking-tighter text-center">Clinic<span className="text-blue-600">Flow</span></h1>
+            <p className="text-slate-400 text-[10px] font-black uppercase tracking-[0.2em] mb-8 text-center">Portal v{VERSION}</p>
             <input type="password" placeholder="Passcode" className="w-full p-4 rounded-2xl border-2 mb-4 text-center font-bold outline-none focus:border-blue-500 text-slate-800" value={passcode} onChange={e => setPasscode(e.target.value)} />
-            <button onClick={handleLogin} className="w-full py-4 bg-blue-600 text-white rounded-2xl font-black uppercase text-xs tracking-widest shadow-lg active:scale-95 transition-all">Enter Dashboard</button>
+            <button onClick={handleLogin} className="w-full py-4 bg-blue-600 text-white rounded-2xl font-black uppercase text-xs tracking-widest shadow-lg active:scale-95 transition-all">Enter</button>
           </div>
         </div>
       );
@@ -259,13 +228,13 @@
         <div className="max-w-4xl mx-auto py-24 px-8 animate-in text-slate-800">
           <div className="flex justify-between items-center mb-16">
             <h1 className="text-5xl font-black tracking-tighter uppercase italic">Clinic<span className="text-blue-600">Flow</span></h1>
-            <button onClick={() => handleLogin()} className="p-4 bg-white border border-slate-200 rounded-[2rem] shadow-sm hover:shadow-lg transition-all active:scale-90"><Icon name="refresh-cw" className={isLoading ? "animate-spin text-blue-600" : ""}/></button>
+            <button onClick={handleLogin} className="p-4 bg-white border border-slate-200 rounded-[2rem] shadow-sm hover:shadow-lg active:scale-90 transition-all"><Icon name="refresh-cw" className={isLoading ? "animate-spin text-blue-600" : ""}/></button>
           </div>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
             {patients.map(p => (
               <div key={p.name} onClick={()=>openPatient(p)} className="bg-white p-10 rounded-[3.5rem] shadow-sm border border-slate-100 hover:border-blue-500 hover:shadow-2xl transition-all cursor-pointer group active:scale-95">
                 <div className="w-16 h-16 bg-blue-50 text-blue-600 rounded-[2rem] flex items-center justify-center font-black text-2xl mb-8 group-hover:bg-blue-600 group-hover:text-white transition-colors">{p.name[0]}</div>
-                <h3 className="font-black text-2xl text-slate-800 tracking-tight">{p.name}</h3>
+                <h3 className="font-black text-2xl tracking-tight">{p.name}</h3>
                 <p className="text-xs text-blue-500 font-bold uppercase tracking-widest mt-2">{p.email}</p>
               </div>
             ))}
@@ -275,87 +244,46 @@
         <div className="h-screen flex flex-col overflow-hidden animate-in">
           <header className="bg-white border-b px-8 py-4 flex justify-between items-center shrink-0">
             <div className="flex items-center gap-4">
-              <button onClick={() => setView('list')} className="w-10 h-10 flex items-center justify-center bg-slate-50 rounded-xl hover:bg-slate-100 transition-all"><Icon name="arrow-left"/></button>
+              <button onClick={() => setView('list')} className="w-10 h-10 flex items-center justify-center bg-slate-50 rounded-xl hover:bg-slate-100"><Icon name="arrow-left"/></button>
               <div><h2 className="text-xl font-bold">{selectedPatient.name}</h2><p className="text-[10px] text-blue-500 uppercase font-bold">{selectedPatient.email}</p></div>
             </div>
-            
-            <div className="flex gap-2 items-center">
-              <div className="flex bg-slate-100 p-1.5 rounded-2xl gap-1">
-                <button onClick={toggleRecording} className={`w-12 h-12 rounded-xl flex items-center justify-center transition-all ${isRecording ? 'bg-red-500 text-white' : 'bg-blue-600 text-white'}`}>
-                  <Icon name={isRecording ? "square" : "mic"} className="w-5 h-5"/>
-                </button>
-                {isRecording && (
-                  <button onClick={pauseRecording} className={`w-12 h-12 rounded-xl flex items-center justify-center transition-all ${isPaused ? 'bg-amber-500 text-white' : 'bg-slate-300 text-slate-700'}`}>
-                    <Icon name={isPaused ? "play" : "pause"} className="w-5 h-5"/>
-                  </button>
-                )}
-              </div>
-              
-              {!isRecording && (
-                <button onClick={generateSOAP} disabled={isLoading || !transcript} className="bg-slate-900 text-white px-6 py-2 h-12 rounded-xl text-xs font-bold uppercase shadow-lg disabled:opacity-50 transition-all">Generate SOAP</button>
-              )}
+            <div className="flex gap-2">
+              <button onClick={toggleRecording} className={`w-12 h-12 rounded-xl flex items-center justify-center transition-all ${isRecording ? 'bg-red-500 text-white' : 'bg-blue-600 text-white'}`}><Icon name={isRecording ? "square" : "mic"}/></button>
+              {!isRecording && transcript && <button onClick={generateSOAP} disabled={isLoading} className="bg-slate-900 text-white px-6 py-2 h-12 rounded-xl text-xs font-bold uppercase shadow-lg disabled:opacity-50">Generate SOAP</button>}
             </div>
           </header>
 
           <main className="flex-1 flex overflow-hidden">
             <aside className="w-4/12 bg-white border-r p-6 overflow-y-auto custom-scrollbar">
-              <h3 className="text-[10px] font-black uppercase text-slate-400 tracking-widest mb-4">Latest Intake</h3>
-              <div className="bg-slate-50 p-5 rounded-2xl text-sm leading-relaxed text-slate-600 mb-8 whitespace-pre-wrap border border-slate-100 shadow-inner">{history?.intakes?.[0]?.summary || "No assessment found."}</div>
-              <h3 className="text-[10px] font-black uppercase text-slate-400 tracking-widest mb-4">Past Session History</h3>
-              {history?.soapNotes?.map((n, i) => (<div key={i} className="p-3 border border-slate-100 rounded-xl mb-3 text-xs italic text-slate-500 bg-white shadow-sm">"{n.content}"</div>))}
+              <h3 className="text-[10px] font-black uppercase text-slate-400 mb-4">Latest Intake</h3>
+              <div className="bg-slate-50 p-5 rounded-2xl text-sm leading-relaxed text-slate-600 mb-8 whitespace-pre-wrap">{history?.intakes?.[0]?.summary || "No history found."}</div>
+              <h3 className="text-[10px] font-black uppercase text-slate-400 mb-4 tracking-widest">Previous Notes</h3>
+              {history?.soapNotes?.map((n, i) => (<div key={i} className="p-3 border border-slate-100 rounded-xl mb-3 text-xs italic text-slate-500 bg-white">"{n.content}"</div>))}
             </aside>
 
             <div className="flex-1 p-8 overflow-y-auto custom-scrollbar space-y-8 bg-slate-50/50">
               {isRecording && (
                 <div className="bg-white p-12 rounded-[3rem] border-2 border-dashed border-red-200 flex flex-col items-center justify-center animate-in">
-                  <div className={`w-20 h-20 bg-red-100 rounded-full flex items-center justify-center mb-6 ${!isPaused ? 'recording-pulse' : ''}`}>
-                    <Icon name={isPaused ? "pause" : "mic"} className="w-8 h-8 text-red-600" />
-                  </div>
-                  <h3 className="text-xl font-bold text-slate-800 tracking-tight">{isPaused ? 'Session Paused' : 'Listening & Transcribing...'}</h3>
-                  <p className="text-xs text-slate-400 italic mt-4">"{transcript.slice(-120)}..."</p>
+                  <div className="w-20 h-20 bg-red-100 rounded-full flex items-center justify-center mb-6 recording-pulse"><Icon name="mic" className="w-8 h-8 text-red-600" /></div>
+                  <h3 className="text-xl font-bold text-slate-800 tracking-tight">Transcribing Session...</h3>
+                  <div className="max-w-md text-center mt-4"><p className="text-sm text-slate-500 italic">"{transcript.slice(-100)}..."</p></div>
                 </div>
               )}
-
-              {audioUrl && !isRecording && (
-                <div className="bg-blue-600 p-4 rounded-3xl flex items-center justify-between text-white shadow-xl animate-in">
-                  <div className="flex items-center gap-4">
-                    <Icon name="check-circle" className="w-6 h-6 text-blue-200" />
-                    <div><p className="text-xs font-black uppercase tracking-widest opacity-80">Capture Complete</p><p className="text-sm font-bold">Transcription ready for analysis</p></div>
-                  </div>
-                  <audio src={audioUrl} controls className="h-8 max-w-[200px]" />
-                </div>
-              )}
-
               {currentSoap && (
                 <div className="bg-white rounded-3xl border shadow-xl overflow-hidden animate-in">
-                  <div className="p-4 border-b flex justify-between bg-white items-center"><span className="text-xs font-black uppercase text-slate-400 tracking-widest">Clinical Progression Note</span><button onClick={()=>callApi('saveSoapNote', {patientName: selectedPatient.name, content: currentSoap}).then(()=>showToast("Note Logged"))} className="bg-emerald-600 text-white px-5 py-2 rounded-xl text-[10px] font-bold uppercase shadow-lg">Save to Sheet</button></div>
-                  <textarea value={currentSoap} onChange={e=>setCurrentSoap(e.target.value)} className="w-full h-80 p-8 outline-none text-sm text-slate-700 leading-relaxed font-medium custom-scrollbar"/>
+                  <div className="p-4 border-b flex justify-between bg-white items-center"><span className="text-xs font-black uppercase text-slate-400 tracking-widest">Clinical Note</span><button onClick={()=>callApi('saveSoapNote', {patientName: selectedPatient.name, content: currentSoap}).then(()=>showToast("Note Saved"))} className="bg-emerald-600 text-white px-5 py-2 rounded-xl text-[10px] font-bold uppercase shadow-lg">Log to Sheet</button></div>
+                  <textarea value={currentSoap} onChange={e=>setCurrentSoap(e.target.value)} className="w-full h-96 p-8 outline-none text-sm text-slate-700 leading-relaxed font-medium custom-scrollbar"/>
                 </div>
               )}
-
-              {/* HEP Photo Sequencer */}
               <div className="bg-white p-8 rounded-[2.5rem] border shadow-sm">
-                <div className="flex justify-between items-center mb-8">
-                  <h3 className="font-bold text-slate-800 tracking-tight">HEP Photo Sequencer</h3>
-                  <button onClick={()=>document.getElementById('upl').click()} className="bg-blue-50 text-blue-600 px-5 py-2 rounded-xl text-[10px] font-bold uppercase flex items-center gap-2 hover:bg-blue-100 transition-all"><Icon name="camera" className="w-3 h-3"/> Upload Movement</button>
-                  <input id="upl" type="file" hidden multiple accept="image/*" onChange={handlePhotoUpload}/>
+                <div className="flex justify-between items-center mb-8"><h3 className="font-bold text-slate-800 tracking-tight">HEP Sequencer</h3><button onClick={()=>document.getElementById('upl').click()} className="bg-blue-50 text-blue-600 px-5 py-2 rounded-xl text-[10px] font-bold uppercase flex items-center gap-2 hover:bg-blue-100 transition-all"><Icon name="camera" className="w-3 h-3"/> Upload</button><input id="upl" type="file" hidden multiple accept="image/*" onChange={handlePhotoUpload}/></div>
+                <div className="grid grid-cols-4 gap-4">
+                  {hepPhotos.map((p, i) => (<div key={i} className="relative group animate-in"><img src={p} className="aspect-square object-cover rounded-2xl border border-slate-100 shadow-sm"/><button onClick={()=>setHepPhotos(prev=>prev.filter((_, idx)=>idx!==i))} className="absolute -top-2 -right-2 bg-red-500 text-white rounded-full p-1 opacity-0 group-hover:opacity-100 transition-opacity shadow-lg"><Icon name="x" className="w-3 h-3"/></button></div>))}
                 </div>
-                <div className="grid grid-cols-4 gap-4 mb-6">
-                  {hepPhotos.map((p, i) => (
-                    <div key={i} className="relative group animate-in">
-                      <img src={p} className="aspect-square object-cover rounded-2xl border border-slate-100 shadow-sm"/>
-                      <button onClick={()=>setHepPhotos(prev=>prev.filter((_, idx)=>idx!==i))} className="absolute -top-2 -right-2 bg-red-500 text-white rounded-full p-1 opacity-0 group-hover:opacity-100 transition-opacity shadow-lg">
-                        <Icon name="x" className="w-3 h-3"/>
-                      </button>
-                    </div>
-                  ))}
-                  {hepPhotos.length === 0 && <div className="col-span-4 py-12 text-center text-slate-300 text-xs font-bold uppercase tracking-widest border-2 border-dashed border-slate-100 rounded-3xl">Ready for Movement Sequences</div>}
-                </div>
-                <button className="w-full mt-4 bg-slate-900 text-white py-4 rounded-2xl font-bold text-xs uppercase tracking-widest shadow-lg">Construct Program Guide</button>
               </div>
             </div>
           </main>
-          {isLoading && <div className="fixed inset-0 bg-white/80 backdrop-blur-sm z-[300] flex items-center justify-center flex-col gap-4 font-black text-blue-600 animate-pulse tracking-[0.3em] uppercase text-[10px]"><Icon name="loader-2" className="animate-spin w-10 h-10 mb-2"/> Clinical Intelligence Processing...</div>}
+          {isLoading && <div className="fixed inset-0 bg-white/80 backdrop-blur-sm z-[300] flex items-center justify-center flex-col gap-4 font-black text-blue-600 animate-pulse tracking-[0.3em] uppercase text-[10px]"><Icon name="loader-2" className="animate-spin w-10 h-10 mb-2"/> Processing AI Insight...</div>}
           {statusMsg && <div className="fixed bottom-10 right-10 bg-slate-900 text-white px-8 py-4 rounded-2xl shadow-2xl z-[300] text-[10px] font-black uppercase border border-slate-700 animate-in tracking-widest">{statusMsg}</div>}
         </div>
       );

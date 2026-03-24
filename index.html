@@ -27,7 +27,7 @@
     <div class="h-screen flex items-center justify-center bg-slate-50">
       <div class="text-center space-y-4">
         <div class="inline-block w-8 h-8 border-4 border-blue-600 border-t-transparent rounded-full animate-spin"></div>
-        <p class="text-sm font-bold text-slate-400 uppercase tracking-widest">Initializing ClinicFlow v5.6...</p>
+        <p class="text-sm font-bold text-slate-400 uppercase tracking-widest">Loading ClinicFlow...</p>
       </div>
     </div>
   </div>
@@ -41,6 +41,7 @@
     };
 
     // --- CONFIGURATION ---
+    const VERSION = "1.0";
     const apiKey = "AIzaSyCW-UgXFZpbdqp1Cu-k691q7h_nvZu7ovY"; 
     const SCRIPT_URL = "https://script.google.com/macros/s/AKfycbzuebIKaOUaautJwjjofHMQmuLiJRUy3CP4yRXL42pf7d2spujhvBhu16NnZZA2pJkNdw/exec"; 
 
@@ -134,7 +135,7 @@
               reader.readAsDataURL(blob);
               reader.onloadend = () => {
                 setAudioBase64(reader.result.split(',')[1]);
-                showToast("Audio processed. Backup available.");
+                showToast("Audio processed. Ready for AI analysis.");
               };
               stream.getTracks().forEach(t => t.stop());
             };
@@ -183,50 +184,36 @@
         });
       };
 
-      // FIXED MODEL CALL: Switching to gemini-2.5-flash-preview-09-2025 for better stability
       const callGemini = async (prompt, isJson = false) => {
-        const modelName = "gemini-2.5-flash-preview-09-2025";
-        const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${apiKey}`;
+        const configs = [
+          { version: 'v1beta', model: 'gemini-1.5-flash' },
+          { version: 'v1', model: 'gemini-1.5-flash' },
+          { version: 'v1beta', model: 'gemini-1.5-flash-latest' },
+          { version: 'v1', model: 'gemini-1.5-pro' }
+        ];
 
-        try {
-          const payload = {
-            contents: [{
-              parts: [
-                { text: prompt },
-                { 
-                  inlineData: { 
-                    mimeType: audioMime === "audio/mp4" ? "audio/mp4" : "audio/webm", 
-                    data: audioBase64 
-                  } 
-                }
-              ]
-            }]
-          };
+        let lastError = "";
+        const cleanMime = audioMime.split(';')[0];
 
-          if (isJson) {
-            payload.generationConfig = { responseMimeType: "application/json" };
-          }
-
-          const res = await fetch(url, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload)
-          });
-
-          const json = await res.json();
-          if (!res.ok) {
-            console.error("Gemini Error Payload:", json);
-            throw new Error(json.error?.message || `API Error: ${res.status}`);
-          }
-          
-          if (json.candidates && json.candidates[0]?.content?.parts?.[0]?.text) {
-            return json.candidates[0].content.parts[0].text;
-          }
-          throw new Error("AI returned empty response.");
-        } catch (e) { 
-          console.error("CallGemini Catch:", e);
-          throw new Error(e.message); 
+        for (const config of configs) {
+          try {
+            const url = `https://generativelanguage.googleapis.com/${config.version}/models/${config.model}:generateContent?key=${apiKey}`;
+            const payload = {
+              contents: [{
+                parts: [
+                  { text: prompt },
+                  { inlineData: { mimeType: cleanMime, data: audioBase64 } }
+                ]
+              }]
+            };
+            if (isJson) payload.generationConfig = { responseMimeType: "application/json" };
+            const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+            const json = await res.json();
+            if (res.ok && json.candidates?.[0]?.content?.parts?.[0]?.text) return json.candidates[0].content.parts[0].text;
+            lastError = json.error?.message || `Status: ${res.status}`;
+          } catch (e) { lastError = e.message; }
         }
+        throw new Error(lastError);
       };
 
       const generateSOAP = async () => {
@@ -237,7 +224,9 @@
           const text = await callGemini(prompt);
           setCurrentSoap(text);
           showToast("SOAP Note Generated.");
-        } catch (e) { showToast(`AI Error: ${e.message}`); }
+        } catch (e) { 
+          showToast(`AI System Error: ${e.message}`); 
+        }
         setIsLoading(false);
       };
 
@@ -245,7 +234,7 @@
         <div className="h-screen flex items-center justify-center bg-slate-900 p-6">
           <div className="bg-white p-12 rounded-[3rem] shadow-2xl w-full max-sm animate-in">
             <h1 className="text-3xl font-black mb-1 italic tracking-tighter">Clinic<span className="text-blue-600">Flow</span></h1>
-            <p className="text-slate-400 text-[10px] font-black uppercase tracking-[0.2em] mb-8 text-center">Secure Clinician Access</p>
+            <p className="text-slate-400 text-[10px] font-black uppercase tracking-[0.2em] mb-8 text-center">Secure Clinician Access • v{VERSION}</p>
             <input type="password" placeholder="Passcode" className="w-full p-4 rounded-2xl border-2 mb-4 text-center font-bold outline-none focus:border-blue-500 text-slate-800" value={passcode} onChange={e => setPasscode(e.target.value)} />
             <button onClick={handleLogin} className="w-full py-4 bg-blue-600 text-white rounded-2xl font-black uppercase text-xs tracking-widest shadow-lg active:scale-95 transition-all">Enter Dashboard</button>
           </div>
@@ -277,7 +266,6 @@
             </div>
             
             <div className="flex gap-2 items-center">
-              {/* Recording Controls */}
               <div className="flex bg-slate-100 p-1.5 rounded-2xl gap-1">
                 <button onClick={toggleRecording} className={`w-12 h-12 rounded-xl flex items-center justify-center transition-all ${isRecording ? 'bg-red-500 text-white' : 'bg-blue-600 text-white'}`}>
                   <Icon name={isRecording ? "square" : "mic"} className="w-5 h-5"/>
@@ -289,13 +277,12 @@
                 )}
               </div>
               
-              {/* Post-Recording Actions */}
               {audioUrl && !isRecording && (
                 <div className="flex items-center gap-2 animate-in">
                    <button onClick={downloadBackup} className="w-10 h-10 flex items-center justify-center bg-white border border-slate-200 rounded-xl hover:bg-slate-50 text-slate-400" title="Download Audio Backup">
                     <Icon name="download" className="w-4 h-4"/>
                   </button>
-                  <button onClick={generateSOAP} disabled={isLoading} className="bg-slate-900 text-white px-6 py-2 h-12 rounded-xl text-xs font-bold uppercase shadow-lg disabled:opacity-30">Generate SOAP</button>
+                  <button onClick={generateSOAP} disabled={isLoading} className="bg-slate-900 text-white px-6 py-2 h-12 rounded-xl text-xs font-bold uppercase shadow-lg disabled:opacity-50">Generate SOAP</button>
                 </div>
               )}
             </div>
@@ -316,7 +303,7 @@
                     <Icon name={isPaused ? "pause" : "mic"} className="w-8 h-8 text-red-600" />
                   </div>
                   <h3 className="text-xl font-bold text-slate-800 tracking-tight">{isPaused ? 'Session Paused' : 'Listening to Clinical Session...'}</h3>
-                  <p className="text-xs text-slate-400 uppercase font-black tracking-widest mt-2">{isPaused ? 'Ready to resume' : 'Capture clinical findings'}</p>
+                  <p className="text-xs text-slate-400 uppercase font-black tracking-widest mt-2">{isPaused ? 'Ready to resume' : 'Capturing documentation findings'}</p>
                 </div>
               )}
 
@@ -324,7 +311,7 @@
                 <div className="bg-blue-600 p-4 rounded-3xl flex items-center justify-between text-white shadow-xl animate-in">
                   <div className="flex items-center gap-4">
                     <Icon name="check-circle" className="w-6 h-6 text-blue-200" />
-                    <div><p className="text-xs font-black uppercase tracking-widest opacity-80">Capture Complete</p><p className="text-sm font-bold">Audio is ready for documentation</p></div>
+                    <div><p className="text-xs font-black uppercase tracking-widest opacity-80">Capture Complete</p><p className="text-sm font-bold">Audio is ready for AI analysis</p></div>
                   </div>
                   <audio src={audioUrl} controls className="h-8 max-w-[200px]" />
                 </div>
@@ -355,11 +342,11 @@
                   ))}
                   {hepPhotos.length === 0 && <div className="col-span-4 py-12 text-center text-slate-300 text-xs font-bold uppercase tracking-widest border-2 border-dashed border-slate-100 rounded-3xl">Ready for Movement Sequences</div>}
                 </div>
-                <button className="w-full py-4 bg-slate-900 text-white rounded-2xl font-bold text-xs uppercase tracking-widest shadow-lg active:scale-[0.98] transition-all">Construct Program Guide</button>
+                <button className="w-full mt-4 bg-slate-900 text-white py-4 rounded-2xl font-bold text-xs uppercase tracking-widest shadow-lg">Construct Program Guide</button>
               </div>
             </div>
           </main>
-          {isLoading && <div className="fixed inset-0 bg-white/80 backdrop-blur-sm z-[300] flex items-center justify-center flex-col gap-4 font-black text-blue-600 animate-pulse tracking-[0.3em] uppercase text-[10px]"><Icon name="loader-2" className="animate-spin w-10 h-10 mb-2"/> Processing AI Pipeline...</div>}
+          {isLoading && <div className="fixed inset-0 bg-white/80 backdrop-blur-sm z-[300] flex items-center justify-center flex-col gap-4 font-black text-blue-600 animate-pulse tracking-[0.3em] uppercase text-[10px]"><Icon name="loader-2" className="animate-spin w-10 h-10 mb-2"/> Clinical Intelligence Processing...</div>}
           {statusMsg && <div className="fixed bottom-10 right-10 bg-slate-900 text-white px-8 py-4 rounded-2xl shadow-2xl z-[300] text-[10px] font-black uppercase border border-slate-700 animate-in tracking-widest">{statusMsg}</div>}
         </div>
       );

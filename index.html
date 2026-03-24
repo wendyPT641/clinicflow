@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>ClinicFlow | Secure Portal v2.1</title>
+  <title>ClinicFlow | Secure Portal v2.5</title>
   <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
   <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
@@ -31,7 +31,7 @@
       return <i data-lucide={name} className={className}></i>;
     };
 
-    const VERSION = "2.1";
+    const VERSION = "2.5";
     const SCRIPT_URL = "https://script.google.com/macros/s/AKfycbzuebIKaOUaautJwjjofHMQmuLiJRUy3CP4yRXL42pf7d2spujhvBhu16NnZZA2pJkNdw/exec"; 
 
     function App() {
@@ -53,6 +53,7 @@
       const [transcript, setTranscript] = useState("");
       const [hepPhotos, setHepPhotos] = useState([]);
       const [currentSoap, setCurrentSoap] = useState("");
+      const [currentHep, setCurrentHep] = useState("");
       const [activeModel, setActiveModel] = useState("gemini-1.5-flash");
 
       const mediaRecorderRef = useRef(null);
@@ -64,7 +65,7 @@
         setTimeout(() => setStatusMsg(null), 6000);
       };
 
-      // Initialize Native Browser Speech Recognition
+      // Native Transcription Engine
       useEffect(() => {
         const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
         if (SpeechRecognition) {
@@ -79,7 +80,6 @@
             }
             setTranscript(prev => prev + final);
           };
-          recognitionRef.current.onerror = (e) => console.error("Speech Recognition Error:", e.error);
         }
       }, []);
 
@@ -126,11 +126,12 @@
         });
         const json = await res.json();
         if (json.status === 'success') {
-          setHistory(json.data);
+          setHistory(res.data);
           setView('detail');
           setTranscript("");
           setAudioUrl(null);
           setCurrentSoap("");
+          setCurrentHep("");
           setHepPhotos([]);
         }
         setIsLoading(false);
@@ -176,22 +177,17 @@
         }
       };
 
-      const downloadAudio = () => {
-        if (!audioUrl) return;
-        const link = document.createElement('a');
-        link.href = audioUrl;
-        link.download = `Session_Backup_${selectedPatient.name}.webm`;
-        link.click();
-      };
-
       const generateSOAP = async () => {
         if (!transcript) return showToast("Nothing recorded.");
         setIsLoading(true);
         try {
           const intake = history?.intakes?.[0]?.summary || "N/A";
-          const prompt = `Act as an expert Physical Therapist. Generate a clinical SOAP note from this transcript. 
-          Context: ${intake}
-          Transcript: ${transcript}`;
+          const prompt = `Act as an expert Physical Therapist. Generate a professional clinical SOAP note based strictly on the current session transcript. Use the initial intake summary for patient background only.
+          
+          INTAKE CONTEXT: ${intake}
+          CURRENT SESSION DIALOGUE: ${transcript}
+          
+          Format as a standard SOAP note. Focus on clinical progression and measurements mentioned.`;
           
           const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${activeModel}:generateContent?key=${userApiKey}`, {
             method: 'POST',
@@ -207,6 +203,41 @@
         setIsLoading(false);
       };
 
+      const generateHEP = async () => {
+        if (hepPhotos.length === 0) return showToast("Upload movement photos first.");
+        setIsLoading(true);
+        try {
+          const intake = history?.intakes?.[0]?.summary || "N/A";
+          
+          const parts = [
+            { text: `Act as a Physical Therapist. Create a Home Exercise Program (HEP) guide for this patient based on the photos and the SESSION TRANSCRIPT.
+              
+              CONTEXT:
+              Patient Background: ${intake}
+              Recorded Session Talk: ${transcript}
+              
+              INSTRUCTIONS:
+              - Use the transcript to identify EXACT cues, modifications, or specific set/rep schemes you verbally told the patient.
+              - Match the photos to the exercises discussed.
+              - For each photo: Give clear name, patient-friendly instructions, sets/reps, and "Key Cues" based on what was said in the talk.
+              - If a modification was mentioned in the talk (e.g. "don't go too low"), include it in the guide.` }
+          ];
+
+          hepPhotos.forEach(data => parts.push({ inlineData: { mimeType: "image/png", data: data.split(',')[1] } }));
+
+          const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${activeModel}:generateContent?key=${userApiKey}`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ contents: [{ parts }] })
+          });
+          const json = await res.json();
+          if (json.candidates?.[0]?.content?.parts?.[0]?.text) {
+            setCurrentHep(json.candidates[0].content.parts[0].text);
+            showToast("HEP Guide Constructed from Session Talk.");
+          }
+        } catch (e) { showToast(`HEP Error: ${e.message}`); }
+        setIsLoading(false);
+      };
+
       const handlePhotoUpload = (e) => {
         Array.from(e.target.files).forEach(file => {
           const r = new FileReader();
@@ -217,12 +248,12 @@
 
       if (!isAuthenticated) return (
         <div className="h-screen flex items-center justify-center bg-slate-900 p-6">
-          <div className="bg-white p-12 rounded-[3.5rem] shadow-2xl w-full max-w-md animate-in">
+          <div className="bg-white p-12 rounded-[3.5rem] shadow-2xl w-full max-md animate-in">
             <h1 className="text-3xl font-black mb-1 italic tracking-tighter text-center">Clinic<span className="text-blue-600">Flow</span></h1>
-            <p className="text-slate-400 text-[10px] font-black uppercase tracking-[0.2em] mb-10 text-center">Documentation Suite • v{VERSION}</p>
+            <p className="text-slate-400 text-[10px] font-black uppercase tracking-[0.2em] mb-10 text-center">Intelligent Documentation • v{VERSION}</p>
             <div className="space-y-4">
-              <input type="password" placeholder="Clinic Passcode" className="w-full p-4 rounded-2xl border-2 text-center font-bold bg-slate-50" value={passcode} onChange={e => setPasscode(e.target.value)} />
-              <input type="password" placeholder="Gemini API Key" className="w-full p-4 rounded-2xl border-2 text-center text-xs font-mono bg-slate-50" value={userApiKey} onChange={e => setUserApiKey(e.target.value)} />
+              <input type="password" placeholder="Clinic Passcode" className="w-full p-4 rounded-2xl border-2 text-center font-bold bg-slate-50 outline-none focus:border-blue-500" value={passcode} onChange={e => setPasscode(e.target.value)} />
+              <input type="password" placeholder="Gemini API Key" className="w-full p-4 rounded-2xl border-2 text-center text-xs font-mono bg-slate-50 outline-none focus:border-blue-500" value={userApiKey} onChange={e => setUserApiKey(e.target.value)} />
               <button onClick={handleLogin} className="w-full py-5 bg-blue-600 text-white rounded-[2rem] font-black uppercase text-xs tracking-widest shadow-xl active:scale-95 transition-all">Verify & Enter</button>
             </div>
           </div>
@@ -233,7 +264,7 @@
         <div className="max-w-4xl mx-auto py-24 px-8 animate-in text-slate-800">
           <div className="flex justify-between items-center mb-16">
             <h1 className="text-5xl font-black tracking-tighter uppercase italic">Clinic<span className="text-blue-600">Flow</span></h1>
-            <div className="bg-emerald-50 text-emerald-600 px-4 py-2 rounded-full text-[9px] font-black uppercase">Systems Online</div>
+            <div className="bg-emerald-50 text-emerald-600 px-4 py-2 rounded-full text-[9px] font-black uppercase tracking-widest">Dashboard Active</div>
           </div>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
             {patients.map(p => (
@@ -249,13 +280,13 @@
         <div className="h-screen flex flex-col overflow-hidden animate-in">
           <header className="bg-white border-b px-8 py-4 flex justify-between items-center shrink-0">
             <div className="flex items-center gap-4">
-              <button onClick={() => setView('list')} className="w-10 h-10 flex items-center justify-center bg-slate-50 rounded-xl hover:bg-slate-100"><Icon name="arrow-left"/></button>
-              <div><h2 className="text-xl font-bold">{selectedPatient.name}</h2><p className="text-[10px] text-blue-500 uppercase font-bold">{selectedPatient.email}</p></div>
+              <button onClick={() => setView('list')} className="w-10 h-10 flex items-center justify-center bg-slate-50 rounded-xl hover:bg-slate-100 transition-all"><Icon name="arrow-left"/></button>
+              <div><h2 className="text-xl font-bold tracking-tight">{selectedPatient.name}</h2><p className="text-[10px] text-blue-500 uppercase font-bold tracking-widest">{selectedPatient.email}</p></div>
             </div>
             
             <div className="flex gap-2">
                <div className="flex bg-slate-100 p-1 rounded-2xl">
-                <button onClick={toggleRecording} className={`w-10 h-10 rounded-xl flex items-center justify-center transition-all ${isRecording ? 'bg-red-500 text-white' : 'bg-blue-600 text-white'}`}>
+                <button onClick={toggleRecording} className={`w-10 h-10 rounded-xl flex items-center justify-center transition-all ${isRecording ? 'bg-red-500 text-white shadow-lg' : 'bg-blue-600 text-white'}`}>
                   <Icon name={isRecording ? "square" : "mic"} className="w-4 h-4"/>
                 </button>
                 {isRecording && (
@@ -264,23 +295,24 @@
                   </button>
                 )}
               </div>
-              {audioUrl && !isRecording && (
-                <button onClick={downloadAudio} className="w-10 h-10 border rounded-xl flex items-center justify-center text-slate-400 hover:bg-slate-50" title="Download Backup">
-                  <Icon name="download" className="w-4 h-4"/>
-                </button>
-              )}
               {!isRecording && transcript && (
-                <button onClick={generateSOAP} disabled={isLoading} className="bg-slate-900 text-white px-6 py-2 h-10 rounded-xl text-xs font-bold uppercase shadow-lg disabled:opacity-50">Generate SOAP</button>
+                <button onClick={generateSOAP} disabled={isLoading} className="bg-slate-900 text-white px-6 py-2 h-10 rounded-xl text-[10px] font-black uppercase shadow-lg disabled:opacity-50">Generate SOAP</button>
               )}
             </div>
           </header>
 
           <main className="flex-1 flex overflow-hidden">
             <aside className="w-4/12 bg-white border-r p-6 overflow-y-auto custom-scrollbar">
-              <h3 className="text-[10px] font-black uppercase text-slate-400 mb-4 tracking-widest">Clinical Context</h3>
+              <h3 className="text-[10px] font-black uppercase text-slate-400 mb-4 tracking-widest">Clinical Baseline</h3>
               <div className="bg-slate-50 p-5 rounded-2xl text-sm leading-relaxed text-slate-600 mb-8 whitespace-pre-wrap border border-slate-100 shadow-inner">{history?.intakes?.[0]?.summary || "No assessment found."}</div>
-              <h3 className="text-[10px] font-black uppercase text-slate-400 mb-4 tracking-widest">Past Progress Notes</h3>
-              {history?.soapNotes?.map((n, i) => (<div key={i} className="p-3 border border-slate-100 rounded-xl mb-3 text-xs italic text-slate-400 bg-white">"{n.content}"</div>))}
+              <h3 className="text-[10px] font-black uppercase text-slate-400 mb-4 tracking-widest">Documentation Logic</h3>
+              <div className="p-3 border border-slate-100 rounded-xl mb-3 text-[10px] font-bold text-blue-500 uppercase bg-blue-50 italic flex items-center gap-2"><Icon name="cpu" className="w-3 h-3"/> Engine: {activeModel}</div>
+              {!isRecording && transcript && (
+                <div className="p-4 bg-slate-50 rounded-2xl border border-slate-100 mt-4">
+                  <h4 className="text-[9px] font-black uppercase text-slate-400 mb-2 tracking-widest">Session Transcript</h4>
+                  <p className="text-[11px] text-slate-500 leading-relaxed italic line-clamp-6">"{transcript}"</p>
+                </div>
+              )}
             </aside>
 
             <div className="flex-1 p-8 overflow-y-auto custom-scrollbar space-y-8 bg-slate-50/50">
@@ -289,15 +321,8 @@
                   <div className={`w-20 h-20 bg-red-100 rounded-full flex items-center justify-center mb-6 ${!isPaused ? 'recording-pulse' : ''}`}>
                     <Icon name={isPaused ? "pause" : "mic"} className="w-8 h-8 text-red-600" />
                   </div>
-                  <h3 className="text-xl font-bold text-slate-800 tracking-tight">{isPaused ? 'Transcription Paused' : 'Capturing Session Transcript...'}</h3>
-                  <p className="text-xs text-slate-400 italic mt-4 text-center max-w-sm">"{transcript.slice(-120) || 'Waiting for speech...'}"</p>
-                </div>
-              )}
-
-              {transcript && !isRecording && !currentSoap && (
-                <div className="bg-white p-8 rounded-3xl border shadow-sm">
-                   <h3 className="text-[10px] font-black uppercase text-slate-400 tracking-widest mb-4">Captured Session Text</h3>
-                   <div className="text-sm text-slate-500 italic leading-relaxed whitespace-pre-wrap">{transcript}</div>
+                  <h3 className="text-xl font-bold text-slate-800 tracking-tight">{isPaused ? 'Transcription Paused' : 'Capturing Session Talk...'}</h3>
+                  <p className="text-xs text-slate-400 italic mt-4 text-center max-w-sm leading-relaxed">"{transcript.slice(-120) || 'Waiting for clinical findings...'}"</p>
                 </div>
               )}
 
@@ -305,23 +330,25 @@
                 <div className="bg-white rounded-3xl border shadow-xl overflow-hidden animate-in">
                   <div className="p-4 border-b flex justify-between bg-white items-center">
                     <span className="text-xs font-black uppercase text-slate-400 tracking-widest">Generated SOAP Note</span>
-                    <button onClick={()=>{
-                      fetch(SCRIPT_URL, {method:'POST', body: JSON.stringify({action:'saveSoapNote', passcode, data:{patientName:selectedPatient.name, content:currentSoap}})})
-                      .then(()=>showToast("Saved to Sheet"));
-                    }} className="bg-emerald-600 text-white px-5 py-2 rounded-xl text-[10px] font-bold uppercase shadow-lg">Commit to Chart</button>
+                    <div className="flex gap-2">
+                       <button onClick={()=>setCurrentSoap("")} className="px-4 py-2 text-[10px] font-black uppercase text-slate-400">Discard</button>
+                       <button onClick={()=>{
+                        fetch(SCRIPT_URL, {method:'POST', body: JSON.stringify({action:'saveSoapNote', passcode, data:{patientName:selectedPatient.name, content:currentSoap}})})
+                        .then(()=>showToast("Note Saved to Sheet"));
+                      }} className="bg-emerald-600 text-white px-5 py-2 rounded-xl text-[10px] font-bold uppercase shadow-lg">Commit to Chart</button>
+                    </div>
                   </div>
                   <textarea value={currentSoap} onChange={e=>setCurrentSoap(e.target.value)} className="w-full h-96 p-8 outline-none text-sm text-slate-700 leading-relaxed font-medium custom-scrollbar"/>
                 </div>
               )}
 
-              {/* HEP Section restored */}
               <div className="bg-white p-8 rounded-[2.5rem] border shadow-sm">
                 <div className="flex justify-between items-center mb-8">
                   <h3 className="font-bold text-slate-800 tracking-tight">HEP Photo Sequencer</h3>
-                  <button onClick={()=>document.getElementById('upl').click()} className="bg-blue-50 text-blue-600 px-5 py-2 rounded-xl text-[10px] font-bold uppercase flex items-center gap-2 hover:bg-blue-100 transition-all"><Icon name="camera" className="w-3 h-3"/> Add Position</button>
+                  <button onClick={()=>document.getElementById('upl').click()} className="bg-blue-50 text-blue-600 px-5 py-2 rounded-xl text-[10px] font-bold uppercase flex items-center gap-2 hover:bg-blue-100 transition-all"><Icon name="camera" className="w-3 h-3"/> Upload Positions</button>
                   <input id="upl" type="file" hidden multiple accept="image/*" onChange={handlePhotoUpload}/>
                 </div>
-                <div className="grid grid-cols-4 gap-4">
+                <div className="grid grid-cols-4 gap-4 mb-8">
                   {hepPhotos.map((p, i) => (
                     <div key={i} className="relative group animate-in">
                       <img src={p} className="aspect-square object-cover rounded-2xl border border-slate-100 shadow-sm"/>
@@ -330,11 +357,30 @@
                   ))}
                   {hepPhotos.length === 0 && <div className="col-span-4 py-12 text-center text-slate-300 text-xs font-bold uppercase tracking-widest border-2 border-dashed border-slate-100 rounded-3xl">No movements captured</div>}
                 </div>
+                {hepPhotos.length > 0 && (
+                  <button onClick={generateHEP} disabled={isLoading} className="w-full py-4 bg-slate-900 text-white rounded-2xl font-bold text-xs uppercase tracking-widest shadow-lg active:scale-[0.98] transition-all disabled:opacity-50">
+                    {isLoading ? "Synthesizing from Photos & Talk..." : "Construct Program Guide"}
+                  </button>
+                )}
               </div>
+
+              {currentHep && (
+                <div className="bg-white rounded-3xl border border-blue-200 shadow-xl overflow-hidden animate-in">
+                  <div className="p-4 border-b flex justify-between bg-blue-50 items-center">
+                    <span className="text-xs font-black uppercase text-blue-400 tracking-widest text-center flex items-center gap-2"><Icon name="message-square" className="w-3 h-3"/> Personal Exercise Guide</span>
+                    <button onClick={()=>{
+                      const win = window.open('', '_blank');
+                      win.document.write(`<html><head><title>HEP Guide</title><style>body{font-family:sans-serif;padding:40px;line-height:1.6;}h1{border-bottom:2px solid #3b82f6;}pre{white-space:pre-wrap;}</style></head><body><h1>Exercise Program: ${selectedPatient.name}</h1><pre>${currentHep}</pre></body></html>`);
+                      win.document.close();
+                    }} className="bg-blue-600 text-white px-5 py-2 rounded-xl text-[10px] font-bold uppercase shadow-lg">Open Printable View</button>
+                  </div>
+                  <textarea value={currentHep} onChange={e=>setCurrentHep(e.target.value)} className="w-full h-80 p-8 outline-none text-sm text-slate-700 leading-relaxed font-medium custom-scrollbar bg-slate-50/30"/>
+                </div>
+              )}
             </div>
           </main>
-          {isLoading && <div className="fixed inset-0 bg-white/80 backdrop-blur-sm z-[300] flex items-center justify-center flex-col gap-4 font-black text-blue-600 animate-pulse tracking-widest uppercase text-[10px]"><Icon name="loader-2" className="animate-spin w-10 h-10"/> Synchronizing Intelligence...</div>}
-          {statusMsg && <div className="fixed bottom-10 right-10 bg-slate-900 text-white px-8 py-4 rounded-2xl shadow-2xl z-[300] text-[10px] font-black uppercase border border-slate-700 animate-in tracking-widest">{statusMsg}</div>}
+          {isLoading && <div className="fixed inset-0 bg-white/80 backdrop-blur-sm z-[300] flex items-center justify-center flex-col gap-4 font-black text-blue-600 animate-pulse tracking-widest uppercase text-[10px]"><Icon name="loader-2" className="animate-spin w-10 h-10"/> Clinical Intelligence Hub...</div>}
+          {statusMsg && <div className="fixed bottom-10 right-10 bg-slate-900 text-white px-8 py-4 rounded-2xl shadow-2xl z-[300] text-[10px] font-black uppercase border border-slate-700 animate-in tracking-widest leading-relaxed">{statusMsg}</div>}
         </div>
       );
     }

@@ -41,7 +41,7 @@
     };
 
     // --- CONFIGURATION ---
-    const VERSION = "1.3";
+    const VERSION = "1.4";
     const apiKey = "AIzaSyCW-UgXFZpbdqp1Cu-k691q7h_nvZu7ovY"; 
     const SCRIPT_URL = "https://script.google.com/macros/s/AKfycbzuebIKaOUaautJwjjofHMQmuLiJRUy3CP4yRXL42pf7d2spujhvBhu16NnZZA2pJkNdw/exec"; 
 
@@ -81,21 +81,15 @@
           recognitionRef.current.interimResults = true;
           
           recognitionRef.current.onresult = (event) => {
-            let interimTranscript = "";
-            let finalTranscript = "";
+            let interim = "";
+            let final = "";
             for (let i = event.resultIndex; i < event.results.length; ++i) {
-              if (event.results[i].isFinal) {
-                finalTranscript += event.results[i][0].transcript;
-              } else {
-                interimTranscript += event.results[i][0].transcript;
-              }
+              if (event.results[i].isFinal) final += event.results[i][0].transcript;
+              else interim += event.results[i][0].transcript;
             }
-            setTranscript(prev => prev + finalTranscript);
+            setTranscript(prev => prev + final);
           };
-
-          recognitionRef.current.onerror = (event) => {
-            console.error("Speech Recognition Error", event.error);
-          };
+          recognitionRef.current.onerror = (e) => console.error("Speech Error", e.error);
         }
       }, []);
 
@@ -145,37 +139,25 @@
           try {
             const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
             const mimeType = MediaRecorder.isTypeSupported('audio/webm') ? 'audio/webm' : 'audio/mp4';
-            
             mediaRecorderRef.current = new MediaRecorder(stream, { mimeType });
             audioChunksRef.current = [];
-            
-            mediaRecorderRef.current.ondataavailable = (e) => {
-              if (e.data.size > 0) audioChunksRef.current.push(e.data);
-            };
-            
+            mediaRecorderRef.current.ondataavailable = (e) => audioChunksRef.current.push(e.data);
             mediaRecorderRef.current.onstop = () => {
               const blob = new Blob(audioChunksRef.current, { type: mimeType });
-              const url = URL.createObjectURL(blob);
-              setAudioUrl(url);
+              setAudioUrl(URL.createObjectURL(blob));
               stream.getTracks().forEach(t => t.stop());
             };
-
             mediaRecorderRef.current.start();
             if (recognitionRef.current) {
               setTranscript("");
               recognitionRef.current.start();
             }
-            
             setIsRecording(true);
             setIsPaused(false);
-          } catch (e) { alert("Mic Error: " + e.message); }
+          } catch (e) { alert("Mic Permission Denied."); }
         } else {
-          if (mediaRecorderRef.current && mediaRecorderRef.current.state !== "inactive") {
-            mediaRecorderRef.current.stop();
-          }
-          if (recognitionRef.current) {
-            recognitionRef.current.stop();
-          }
+          if (mediaRecorderRef.current) mediaRecorderRef.current.stop();
+          if (recognitionRef.current) recognitionRef.current.stop();
           setIsRecording(false);
           setIsPaused(false);
           showToast("Transcription complete.");
@@ -196,14 +178,58 @@
         }
       };
 
-      const downloadBackup = () => {
-        if (!audioUrl) return;
-        const link = document.createElement('a');
-        link.href = audioUrl;
-        link.download = `backup_${selectedPatient.name.replace(/\s+/g, '_')}_${new Date().getTime()}.webm`;
-        document.body.appendChild(link);
-        link.click();
-        document.body.removeChild(link);
+      // FINAL STABLE AI CALLER (v1.4)
+      const callGeminiText = async (prompt) => {
+        // We will try these model identifiers in order. 
+        // Note: The /v1/ endpoint is often more stable for 'flash' models than /v1beta/
+        const attempts = [
+          { version: 'v1beta', model: 'gemini-2.5-flash-preview-09-2025' },
+          { version: 'v1', model: 'gemini-1.5-flash' },
+          { version: 'v1beta', model: 'gemini-1.5-flash' },
+          { version: 'v1', model: 'gemini-1.5-pro' }
+        ];
+        
+        let lastError = "";
+
+        for (const config of attempts) {
+          try {
+            const url = `https://generativelanguage.googleapis.com/${config.version}/models/${config.model}:generateContent?key=${apiKey}`;
+            const res = await fetch(url, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] })
+            });
+
+            const json = await res.json();
+            if (res.ok && json.candidates?.[0]?.content?.parts?.[0]?.text) {
+              console.log(`AI Success with ${config.model} via ${config.version}`);
+              return json.candidates[0].content.parts[0].text;
+            }
+            lastError = json.error?.message || `Model ${config.model} failed.`;
+          } catch (e) {
+            lastError = e.message;
+          }
+        }
+        throw new Error(lastError);
+      };
+
+      const generateSOAP = async () => {
+        if (!transcript) return showToast("Nothing recorded to generate from.");
+        setIsLoading(true);
+        try {
+          const intake = history?.intakes?.[0]?.summary || "N/A";
+          const prompt = `Act as a Physical Therapist. Write a professional SOAP note. 
+          CONTEXT: Intake summary: ${intake}.
+          TRANSCRIPT: ${transcript}.
+          Format strictly with S, O, A, P.`;
+          
+          const text = await callGeminiText(prompt);
+          setCurrentSoap(text);
+          showToast("SOAP Note Generated.");
+        } catch (e) { 
+          showToast(`AI Error: ${e.message}`); 
+        }
+        setIsLoading(false);
       };
 
       const handlePhotoUpload = (e) => {
@@ -213,69 +239,6 @@
           reader.onload = () => setHepPhotos(prev => [...prev, reader.result]);
           reader.readAsDataURL(file);
         });
-      };
-
-      // IMPROVED: Smart Fallback System for multiple Gemini models
-      const callGeminiText = async (prompt) => {
-        const modelsToTry = [
-          "gemini-2.5-flash-preview-09-2025", // Internal Preview Stable
-          "gemini-2.5-flash",                 // Requested Stable
-          "gemini-2.5-flash-lite",            // Requested Lite
-          "gemini-3-flash-preview",           // Requested Preview
-          "gemini-1.5-flash"                  // Standard Public Fallback
-        ];
-        
-        let lastError = "";
-
-        for (const modelId of modelsToTry) {
-          const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelId}:generateContent?key=${apiKey}`;
-          try {
-            const res = await fetch(url, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                contents: [{
-                  parts: [{ text: prompt }]
-                }]
-              })
-            });
-
-            const json = await res.json();
-            if (res.ok && json.candidates?.[0]?.content?.parts?.[0]?.text) {
-              console.log(`Successfully used model: ${modelId}`);
-              return json.candidates[0].content.parts[0].text;
-            }
-            lastError = json.error?.message || `Error with ${modelId}`;
-          } catch (e) {
-            lastError = e.message;
-          }
-        }
-        
-        throw new Error(lastError || "Could not connect to any available AI models.");
-      };
-
-      const generateSOAP = async () => {
-        if (!transcript) return showToast("No transcript available.");
-        setIsLoading(true);
-        try {
-          const intakeContext = history?.intakes?.[0]?.summary || "No intake data provided.";
-          const prompt = `Act as a professional Physical Therapist. Generate a detailed clinical SOAP note based on the provided session transcript. Consider the patient's initial intake summary for context.
-          
-          INTAKE SUMMARY FOR CONTEXT:
-          ${intakeContext}
-
-          SESSION TRANSCRIPT:
-          ${transcript}
-          
-          Format the output strictly with S:, O:, A:, and P: sections. Use clinical terminology.`;
-          
-          const text = await callGeminiText(prompt);
-          setCurrentSoap(text);
-          showToast("SOAP Note Generated.");
-        } catch (e) { 
-          showToast(`AI System Error: ${e.message}`); 
-        }
-        setIsLoading(false);
       };
 
       if (!isAuthenticated) return (
@@ -326,14 +289,7 @@
               </div>
               
               {!isRecording && (
-                <div className="flex items-center gap-2 animate-in">
-                   {audioUrl && (
-                     <button onClick={downloadBackup} className="w-10 h-10 flex items-center justify-center bg-white border border-slate-200 rounded-xl hover:bg-slate-50 text-slate-400" title="Download Audio Backup">
-                      <Icon name="download" className="w-4 h-4"/>
-                    </button>
-                   )}
-                  <button onClick={generateSOAP} disabled={isLoading || !transcript} className="bg-slate-900 text-white px-6 py-2 h-12 rounded-xl text-xs font-bold uppercase shadow-lg disabled:opacity-50">Generate SOAP</button>
-                </div>
+                <button onClick={generateSOAP} disabled={isLoading || !transcript} className="bg-slate-900 text-white px-6 py-2 h-12 rounded-xl text-xs font-bold uppercase shadow-lg disabled:opacity-50 transition-all">Generate SOAP</button>
               )}
             </div>
           </header>
@@ -353,9 +309,7 @@
                     <Icon name={isPaused ? "pause" : "mic"} className="w-8 h-8 text-red-600" />
                   </div>
                   <h3 className="text-xl font-bold text-slate-800 tracking-tight">{isPaused ? 'Session Paused' : 'Listening & Transcribing...'}</h3>
-                  <div className="max-w-md text-center mt-4">
-                     <p className="text-sm text-slate-500 italic">"{transcript.slice(-100)}..."</p>
-                  </div>
+                  <p className="text-xs text-slate-400 italic mt-4">"{transcript.slice(-120)}..."</p>
                 </div>
               )}
 
@@ -363,19 +317,10 @@
                 <div className="bg-blue-600 p-4 rounded-3xl flex items-center justify-between text-white shadow-xl animate-in">
                   <div className="flex items-center gap-4">
                     <Icon name="check-circle" className="w-6 h-6 text-blue-200" />
-                    <div><p className="text-xs font-black uppercase tracking-widest opacity-80">Capture Complete</p><p className="text-sm font-bold">Transcript ready for SOAP generation</p></div>
+                    <div><p className="text-xs font-black uppercase tracking-widest opacity-80">Capture Complete</p><p className="text-sm font-bold">Transcription ready for analysis</p></div>
                   </div>
                   <audio src={audioUrl} controls className="h-8 max-w-[200px]" />
                 </div>
-              )}
-
-              {transcript && !isRecording && (
-                 <div className="bg-white p-6 rounded-3xl border shadow-sm">
-                    <h3 className="text-[10px] font-black uppercase text-slate-400 tracking-widest mb-4">Session Transcript</h3>
-                    <div className="max-h-40 overflow-y-auto custom-scrollbar text-sm text-slate-600 bg-slate-50 p-4 rounded-xl italic">
-                      {transcript}
-                    </div>
-                 </div>
               )}
 
               {currentSoap && (

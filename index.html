@@ -27,7 +27,7 @@
     <div class="h-screen flex items-center justify-center bg-slate-50">
       <div class="text-center space-y-4">
         <div class="inline-block w-8 h-8 border-4 border-blue-600 border-t-transparent rounded-full animate-spin"></div>
-        <p class="text-sm font-bold text-slate-400 uppercase tracking-widest">Initializing ClinicFlow v5.5...</p>
+        <p class="text-sm font-bold text-slate-400 uppercase tracking-widest">Initializing ClinicFlow v5.6...</p>
       </div>
     </div>
   </div>
@@ -183,20 +183,29 @@
         });
       };
 
+      // FIXED MODEL CALL: Switching to gemini-2.5-flash-preview-09-2025 for better stability
       const callGemini = async (prompt, isJson = false) => {
-        const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`;
+        const modelName = "gemini-2.5-flash-preview-09-2025";
+        const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${apiKey}`;
 
         try {
           const payload = {
             contents: [{
               parts: [
                 { text: prompt },
-                { inlineData: { mimeType: audioMime === "audio/mp4" ? "audio/mp4" : "audio/webm", data: audioBase64 } }
+                { 
+                  inlineData: { 
+                    mimeType: audioMime === "audio/mp4" ? "audio/mp4" : "audio/webm", 
+                    data: audioBase64 
+                  } 
+                }
               ]
             }]
           };
 
-          if (isJson) payload.generationConfig = { responseMimeType: "application/json" };
+          if (isJson) {
+            payload.generationConfig = { responseMimeType: "application/json" };
+          }
 
           const res = await fetch(url, {
             method: 'POST',
@@ -205,19 +214,26 @@
           });
 
           const json = await res.json();
-          if (!res.ok) throw new Error(json.error?.message || `Status: ${res.status}`);
+          if (!res.ok) {
+            console.error("Gemini Error Payload:", json);
+            throw new Error(json.error?.message || `API Error: ${res.status}`);
+          }
+          
           if (json.candidates && json.candidates[0]?.content?.parts?.[0]?.text) {
             return json.candidates[0].content.parts[0].text;
           }
           throw new Error("AI returned empty response.");
-        } catch (e) { throw new Error(e.message); }
+        } catch (e) { 
+          console.error("CallGemini Catch:", e);
+          throw new Error(e.message); 
+        }
       };
 
       const generateSOAP = async () => {
         if (!audioBase64) return showToast("No recording found.");
         setIsLoading(true);
         try {
-          const prompt = "Write a professional Physical Therapy/MLD SOAP note based on the clinical audio provided. Structure it clearly with S, O, A, and P sections.";
+          const prompt = "Act as a professional Physical Therapist. Write a detailed SOAP note based on the provided clinical audio. Use S, O, A, and P sections. Be clinical and concise.";
           const text = await callGemini(prompt);
           setCurrentSoap(text);
           showToast("SOAP Note Generated.");
